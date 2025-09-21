@@ -1,0 +1,17 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE files
+.vscode/
+
+
+# Data files (optional - remove if you want to track data)
+data/
+*.dat
+*.db
