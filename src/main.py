@@ -21,8 +21,9 @@ def main():
         ]
 
         for sql in sqls:
-            stmt = db.parser.parse(sql)
-            print(f"{sql[:40]}... → {type(stmt).__name__}")
+            statements = db.parser.parse(sql)
+            for stmt in statements:
+                print(f"{sql[:40]}... → {type(stmt).__name__}")
     except Exception as e:
         print(f"Error parser: {e}")
 
@@ -153,13 +154,15 @@ def main():
     print("\nPRUEBA 8: Integración SQL completa")
     try:
         sql_create = "CREATE TABLE empleados (id INT KEY INDEX BTREE, nombre VARCHAR[30], salario FLOAT)"
-        create_stmt = db.parser.parse(sql_create)
+        create_statements = db.parser.parse(sql_create)
+        create_stmt = create_statements[0]
 
         db.create_table(create_stmt.table_name, create_stmt.columns)
         print("Tabla creada desde SQL parseado")
 
         sql_insert = "INSERT INTO empleados VALUES (1, \"Ana\", 3500.0)"
-        insert_stmt = db.parser.parse(sql_insert)
+        insert_statements = db.parser.parse(sql_insert)
+        insert_stmt = insert_statements[0]
         db.insert(insert_stmt.table_name, insert_stmt.values)
         print("Datos insertados desde SQL parseado")
 

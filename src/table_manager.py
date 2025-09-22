@@ -4,7 +4,9 @@ from typing import List, Dict, Any, Optional
 from .parser.ast import (
     ColumnDef, IndexType, Value, Condition, DataType,
     CompCond, BetweenCond, SpatialInCond,
-    SpatialKNNCond, LogicCond
+    SpatialKNNCond, LogicCond, Statement,
+    CreateTableStmt, CreateTableFileStmt, SelectStmt,
+    InsertStmt, DeleteStmt
 )
 from .parser.sql_parser import SQLParser
 from .records import DynamicRecord
@@ -52,7 +54,84 @@ class TableManager:
         os.makedirs(self.data_directory, exist_ok=True)
 
         self.parser = SQLParser()
-    
+        
+    #Se manda directamente el query a la funcion sql, que se encarga de parsearlo y ejecutar cada stmt
+    def sql(self, query: str) -> List[Dict[str, Any]]:
+        statements = self.parser.parse(query)
+        results = []
+
+        for stmt in statements:
+            result = self._execute_statement(stmt)
+            results.append(result)
+
+        return results
+
+    # Para cada uno de los stmts, se verifica que tipo es y se llama a la funcion/operacion correcta
+    def _execute_statement(self, stmt: Statement) -> Dict[str, Any]: 
+        try:
+            if isinstance(stmt, CreateTableStmt):
+                self.create_table(stmt.table_name, stmt.columns)
+                return {
+                    "type": "create_table",
+                    "message": f"Tabla '{stmt.table_name}' creada exitosamente",
+                    "table_name": stmt.table_name
+                }
+
+            elif isinstance(stmt, CreateTableFileStmt):
+                self.create_table_from_file(stmt.table_name, stmt.file_path,
+                                          stmt.index_type, stmt.key_column)
+                return {
+                    "type": "create_table_from_file",
+                    "message": f"Tabla '{stmt.table_name}' creada desde archivo",
+                    "table_name": stmt.table_name
+                }
+
+            elif isinstance(stmt, InsertStmt):
+                self.insert(stmt.table_name, stmt.values)
+                return {
+                    "type": "insert",
+                    "message": f"Registro insertado en '{stmt.table_name}'",
+                    "table_name": stmt.table_name
+                }
+
+            elif isinstance(stmt, SelectStmt):
+                data = self.select(
+                    stmt.table_name,
+                    stmt.columns,
+                    stmt.where_condition,
+                    stmt.order_by,
+                    stmt.order_desc,
+                    stmt.limit
+                )
+                return {
+                    "type": "select",
+                    "data": data,
+                    "table_name": stmt.table_name,
+                    "rows_count": len(data)
+                }
+
+            elif isinstance(stmt, DeleteStmt):
+                deleted_count = self.delete(stmt.table_name, stmt.where_condition)
+                return {
+                    "type": "delete",
+                    "message": f"{deleted_count} registros eliminados de '{stmt.table_name}'",
+                    "table_name": stmt.table_name,
+                    "deleted_count": deleted_count
+                }
+
+            else:
+                return {
+                    "error": f"Tipo de sentencia no soportado:",
+                    "type": "execution_error"
+                }
+
+        except Exception as e:
+            return {
+                "error": str(e),
+                "type": "Error ejecutando sentencia",
+                "statement_type": type(stmt).__name__
+            }
+
     def create_table(self, table_name: str, columns: List[ColumnDef]):
         if table_name in self.tables:
             raise ValueError(f"La tabla '{table_name}' ya existe")

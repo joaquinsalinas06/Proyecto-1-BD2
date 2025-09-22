@@ -11,14 +11,36 @@ class SQLParser:
         self.tokens = []
         self.current = 0
     
-    def parse(self, source: str) -> Statement:
+    def parse(self, source: str) -> List[Statement]:
         lexer = Lexer(source)
         self.tokens = lexer.scan_tokens()
         self.current = 0
-        
-        return self._parse_statement()
-    
-    
+
+        return self._parse_statements()
+
+    def _parse_statements(self) -> List[Statement]:
+        statements = []
+
+        # Leemos todos los statements hasta EOF, en caso nos encontraomos con un ;, verificamos si el usuario no lo ingreso para terminar el statement, si no hay nada despues
+        # Hay que ver si es que realmente terminamos, si no paso nada de eso, entonces error
+        # program -> statement (';' statement)* ';'+
+        while not self._peek().type == TokenType.EOF:
+            stmt = self._parse_statement()
+            statements.append(stmt)
+
+            if self._match(TokenType.SEMICOLON):
+                if self._peek().type == TokenType.EOF:
+                    break
+                continue
+            else:
+                if self._peek().type == TokenType.EOF:
+                    break
+                else:
+                    raise ParseError(f"Se esperaba ';' después de la sentencia en línea {self._peek().line}")
+
+        return statements
+
+
     def _parse_statement(self) -> Statement: # statement -> create_statement | select_statement | insert_statement | delete_statement
         if self._check(TokenType.CREATE):
             return self._parse_create_statement()

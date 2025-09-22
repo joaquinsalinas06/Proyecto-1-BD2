@@ -1,1 +1,5 @@
 rtree
+fastapi
+uvicorn
+pydantic
+requests
