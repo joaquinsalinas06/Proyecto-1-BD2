@@ -4,9 +4,7 @@ from typing import List, Dict, Any, Optional
 from .parser.ast import (
     ColumnDef, IndexType, Value, Condition, DataType,
     CompCond, BetweenCond, SpatialInCond,
-    SpatialKNNCond, LogicCond, CompOp,
-    CreateTableStmt, CreateTableFileStmt,
-    SelectStmt, InsertStmt, DeleteStmt, LogicOp
+    SpatialKNNCond, LogicCond
 )
 from .parser.sql_parser import SQLParser
 from .records import DynamicRecord
@@ -64,6 +62,10 @@ class TableManager:
         
         for col in table.columns:
             if col.index_type:
+                index = create_index(col.index_type, col.name)
+                table.indexes[col.name] = index
+            elif col.is_key and col.index_type is None:
+                col.index_type = IndexType.BTREE
                 index = create_index(col.index_type, col.name)
                 table.indexes[col.name] = index
 
