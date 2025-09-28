@@ -22,10 +22,10 @@ def demo_bptree(M: int) -> None:
     bptree = BPlusTree[int,Record](M)
 
     l = [
-        Record(45, "Ana", 23), 
-        Record(75, "Luis", 30), 
+        Record(45, "Ana", 23),
+        Record(75, "Luis", 30),
         Record(100, "Marta", 22),
-        Record(36, "Juan", 28), 
+        Record(36, "Juan", 28),
         Record(120, "Sofia",40),
         Record(70, "Pedro", 35),
         Record(11, "Lucia", 27),
@@ -37,7 +37,6 @@ def demo_bptree(M: int) -> None:
         Record(52, "Carmen", 26),
         Record(55, "Carmen", 26),
         Record(60, "Carmen", 26),
-        
         ]
 
     # l = [45, 75, 100, 36, 120, 70, 11, 111, 47, 114, 74]
@@ -70,4 +69,13 @@ def demo_bptree(M: int) -> None:
 
 
 if __name__ == "__main__":
+    print("Testing M=3 (odd):")
+    demo_bptree(3)
+
+    print("\n" + "="*50)
+    print("Testing M=5 (odd):")
+    demo_bptree(5)
+
+    print("\n" + "="*50)
+    print("Testing M=4 (even):")
     demo_bptree(4)

@@ -27,9 +27,9 @@ class BPlusTree(Generic[TK, TV]):
         return self._search(self.root, key) if self.root else False
 
     """
-        insert(reg: TV) -> None 
+        insert(reg: TV) -> None
         - TV must be of type Record with attribute id as key, mandatory!!
-        meanwhile, b+tree is just working whit M%2==0, then i'll fix it for odds
+        - Works for both even and odd M values (M >= 3)
     """
     def insert(self, reg: TV) -> None:
         
@@ -116,7 +116,7 @@ class BPlusTree(Generic[TK, TV]):
             assert child is not None, "InternalNode has a None child"
             node = child
 
-        i = self._lower_bound(node.keys, node.count, key) 
+        i = self._lower_bound(node.keys, node.count, key)
 
         if i < node.count and node.keys[i] == key:
             return node.values[i]
@@ -160,10 +160,10 @@ class BPlusTree(Generic[TK, TV]):
         result = []
         i = 0
         for i in range(node.count):
-            if not node.leaf:
+            if not isinstance(node, LeafNode):
                 result.append(self._to_string(node.children[i], sep))
             result.append(str(node.keys[i]) + sep)
-        if not node.leaf:
+        if not isinstance(node, LeafNode):
             result.append(self._to_string(node.children[i], sep)) 
         return "".join(result)
 
@@ -175,14 +175,14 @@ class BPlusTree(Generic[TK, TV]):
             i += 1
         if i < node.count and node.keys[i] == key:
             return True
-        if node.leaf:
+        if isinstance(node, LeafNode):
             return False
         return self._search(node.children[i], key)
 
-    def _insert(self, 
-                node: Node[TK,TV], 
-                key: TK, 
-                reg: TV
+    def _insert(self,
+                node: Node[TK,TV],
+                key: TK,
+                reg: TV 
                 ) -> Optional[ExtractionResult[TK]]:
 
         i = 0
@@ -195,22 +195,17 @@ class BPlusTree(Generic[TK, TV]):
         if ( isinstance(node, LeafNode)):
             if ( node.count < self.M - 1 ):
                 self._relocate(node, key, reg)
-            elif ( self.M % 2 == 0 ):
-                return self._split_par(node, key, reg=reg)
             else:
-                return self._split_impar(node, key)
+                return self._split_par(node, key, reg=reg)
 
         else:
             split_result = self._insert(node.children[i], key, reg=reg)
 
             if ( split_result is not None ):
                 if ( node.count < self.M - 1 ):
-                    # insert in order
                     self._relocate_right(node, split_result.key, split_result.right_tree)
-                elif ( self.M % 2 == 0 ):
-                    return self._split_par(node, split_result.key, split_result.right_tree)
                 else:
-                    return self._split_impar(node, split_result.key, split_result.right_tree)
+                    return self._split_par(node, split_result.key, split_result.right_tree)
         return None
 
     def _relocate(self, node: Node[TK,TV], key: TK, reg: TV) -> None:
@@ -227,19 +222,19 @@ class BPlusTree(Generic[TK, TV]):
             node.values[i] = reg
         node.count += 1
 
-    def _relocate_right(self, 
-                        node: Node[TK,TV], 
+    def _relocate_right(self,
+                        node: Node[TK,TV],
                         key: TK, right_tree: Optional[Node[TK,TV]],
                         reg: Optional[TV] = None
                         ) -> None:
-        
+
         i = node.count - 1
         
         while i >= 0 and key < node.keys[i]:
             node.keys[i + 1] = node.keys[i]
             if ( not isinstance(node, LeafNode) ):
                 node.children[i + 2] = node.children[i + 1]
-            else: 
+            else:
                 node.values[i + 1] = node.values[i]
             i -= 1
 
@@ -276,14 +271,15 @@ class BPlusTree(Generic[TK, TV]):
         i, j = start_from, 0
         
         while i < self.M - 1:
-            right_node.keys[j] = node.keys[i]
-            if ( not isinstance(node, LeafNode)):
-                right_node.children[j] = node.children[i]
-            else:
-                right_node.values[j] = node.values[i]
+            if node.keys[i] is not None:
+                right_node.keys[j] = node.keys[i]
+                if ( not isinstance(node, LeafNode)):
+                    right_node.children[j] = node.children[i]
+                else:
+                    right_node.values[j] = node.values[i]
+                j += 1
             i += 1
-            j += 1
-        
+
         if ( not isinstance(node, LeafNode)):
             right_node.children[j] = node.children[i]
 
@@ -316,15 +312,16 @@ class BPlusTree(Generic[TK, TV]):
                 node.count += 1
                 self._relocate_right(right_node, key, right_tree, reg)
             else:
-                if key < node.keys[m + 1]:
+                if m + 1 < node.count and key < node.keys[m + 1]:
                     middle = key
                     node.count += 1
                     right_node.children[0] = right_tree #cccc
                 else:
-                    middle = node.keys[m + 1]
-                    m = m + 1 if ( isinstance(node, LeafNode) ) else m + 2
-                    right_node = self._generate_right_node(node, m)
-                    node.count = node.count if node.leaf else node.count +1
+                    if m + 1 < node.count:
+                        middle = node.keys[m + 1]
+                        m = m + 1 if ( isinstance(node, LeafNode) ) else m + 2
+                        right_node = self._generate_right_node(node, m)
+                        node.count = node.count if isinstance(node, LeafNode) else node.count +1
                     self._relocate_right(right_node, key, right_tree, reg)
 
         if ( isinstance(node, LeafNode) ):
@@ -333,39 +330,13 @@ class BPlusTree(Generic[TK, TV]):
 
         return ExtractionResult(key=middle, left_tree=None, right_tree=right_node)
 
-    def _split_impar(self, node: Node[TK,TV], key: TK, right_tree: Optional[Node[TK,TV]] = None) -> ExtractionResult[TK]:
-        m = (self.M - 1) // 2
-        if key > node.keys[m]:
-            right_node = self._generate_right_node(node, m + 1)
-            middle = node.keys[m]
-            node.count = (m + 1) if node.leaf else m
-            self._relocate_right(right_node, key, right_tree)
-        else:
-            m = m - 1
-            right_node = self._generate_right_node(node, m + 1)
-            if key < node.keys[m]:
-                middle = node.keys[m]
-                node.count = (m + 1) if node.leaf else m
-                self._relocate_right(node, key, right_tree)
-            else:
-                middle = key
-                if node.leaf:
-                    node.keys[m + 1] = middle  # incluir en hojas (B+)
-                node.count = (m + 2) if node.leaf else (m + 1)
-                right_node.children[0] = right_tree
-
-        if node.leaf:
-            right_node.next = node.next
-            node.next = right_node
-
-        return ExtractionResult(middle, None, right_node)
 
     def _remove(self, node: Node[TK,TV], key: TK) -> None:
         i = 0
         while i < node.count and key > node.keys[i]:
             i += 1
 
-        if node.leaf:
+        if isinstance(node, LeafNode):
             if i < node.count and node.keys[i] == key:
                 self._pop_element(node, i)
             return
@@ -400,7 +371,7 @@ class BPlusTree(Generic[TK, TV]):
                 self._pop_element(node, i)
 
     def _min_key(self, node: Node[TK,TV]) -> TK:
-        while not node.leaf:
+        while not isinstance(node, LeafNode):
             node = node.children[0]  # type: ignore
         return node.keys[0]  # type: ignore
 
@@ -460,7 +431,7 @@ class BPlusTree(Generic[TK, TV]):
             print(node.keys[j], end=",")
         print(node.keys[j] if node.count > 0 else "", end="")
         print("]")
-        if not node.leaf:
+        if not isinstance(node, LeafNode):
             for j in range(node.count + 1):
                 self._display_tree(node.children[node.count - j], indent, j == node.count)
 
