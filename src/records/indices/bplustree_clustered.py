@@ -278,7 +278,7 @@ class BPlusTree(Generic[TK, TV]):
                 else:
                     right_node.values[j] = node.values[i]
                 j += 1
-            i += 1
+                i += 1
 
         if ( not isinstance(node, LeafNode)):
             right_node.children[j] = node.children[i]
