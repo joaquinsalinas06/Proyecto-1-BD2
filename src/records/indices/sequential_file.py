@@ -1,283 +1,281 @@
 import os
 import struct
-import ast
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from .base_index import BaseIndex
+from ..record import DynamicRecord
 
 
-class SequentialFileIndex(BaseIndex):    
-    def __init__(self, column_name: str, filename: str = None):
+class SequentialFileIndex(BaseIndex):
+    def __init__(self, column_name: str, table_schema: List, filename: str = None, max_auxiliary_records: int = 5):
         super().__init__(column_name, filename)
-        self.filename = filename or f"{column_name}_sequential.dat"
-        self.aux_filename = f"{column_name}_aux.dat"
-        self.free_list_filename = f"{column_name}_freelist.dat"
-        self.max_aux_records = 5
+        self.table_schema = table_schema
+        self.max_auxiliary_records = max_auxiliary_records
         
-        self.free_positions = self._load_free_list()
+        temp_record = DynamicRecord._build_format(table_schema)
+        self.record_size = struct.calcsize(temp_record)
+        
+        self.main_file = filename or f"{column_name}_main.dat"
+        self.aux_file = filename.replace('.dat', '_aux.dat') if filename else f"{column_name}_aux.dat"
+        
+        self._ensure_files_exist()
+        
+        self._main_record_count = self._initialize_main_count()
     
-    def _load_free_list(self) -> List[int]:
-        if not os.path.exists(self.free_list_filename):
-            return []
-        
-        free_positions = []
-        with open(self.free_list_filename, 'rb') as f:
-            while True:
-                pos_data = f.read(8)
-                if len(pos_data) != 8:
-                    break
-                position = struct.unpack('Q', pos_data)[0]
-                free_positions.append(position)
-        return free_positions
+    def _ensure_files_exist(self):
+        for file_path in [self.main_file, self.aux_file]:
+            if not os.path.exists(file_path):
+                with open(file_path, 'wb') as f:
+                    pass
     
-    def _save_free_list(self):
-        with open(self.free_list_filename, 'wb') as f:
-            for position in self.free_positions:
-                f.write(struct.pack('Q', position))
+    def _initialize_main_count(self) -> int:
+        if not os.path.exists(self.main_file):
+            return 0
+        
+        file_size = os.path.getsize(self.main_file)
+        return file_size // self.record_size
     
-    def _record_to_bytes(self, record: Dict[str, Any], deleted: bool = False) -> bytes:
-        key_value = record[self.column_name]
+    def _write_record_to_file(self, file_path: str, record_data: Dict[str, Any]) -> bool:
+        record = DynamicRecord(self.table_schema, **record_data)
+        packed_data = record.pack()
         
-        if isinstance(key_value, int):
-            key_bytes = struct.pack('i', key_value)
-        elif isinstance(key_value, float):
-            key_bytes = struct.pack('f', key_value)
-        elif isinstance(key_value, str):
-            key_str = key_value.encode('utf-8')
-            key_bytes = struct.pack('I', len(key_str)) + key_str
-        else:
-            key_str = str(key_value).encode('utf-8')
-            key_bytes = struct.pack('I', len(key_str)) + key_str
-        
-        data_str = str(record).encode('utf-8')
-        
-        deleted_flag = b'\x01' if deleted else b'\x00'
-        return deleted_flag + struct.pack('I', len(key_bytes)) + key_bytes + struct.pack('I', len(data_str)) + data_str
+        with open(file_path, 'ab') as f:
+            f.write(packed_data)
+        return True
     
-    def _bytes_to_record(self, data: bytes) -> tuple[Dict[str, Any], bool]:
-        offset = 0
-        
-        deleted_flag = data[offset:offset+1]
-        is_deleted = deleted_flag == b'\x01'
-        offset += 1
-        
-        key_size = struct.unpack('I', data[offset:offset+4])[0]
-        offset += 4
-        
-        offset += key_size
-        
-        data_size = struct.unpack('I', data[offset:offset+4])[0]
-        offset += 4
-        
-        record_str = data[offset:offset+data_size].decode('utf-8')
-        record = ast.literal_eval(record_str)
-        return record, is_deleted
-    
-    def _read_all_records(self) -> List[Dict[str, Any]]:
+    def _read_records_from_file(self, file_path: str) -> List[Dict[str, Any]]:
         records = []
+        if not os.path.exists(file_path):
+            return records
         
-        if os.path.exists(self.filename):
-            with open(self.filename, 'rb') as f:
-                while True:
-                    size_data = f.read(4)
-                    if len(size_data) != 4:
-                        break
-                    
-                    record_size = struct.unpack('I', size_data)[0]
-                    record_data = f.read(record_size)
-                    
-                    if len(record_data) != record_size:
-                        break
-                    
-                    record, is_deleted = self._bytes_to_record(record_data)
-                    if not is_deleted:
-                        records.append(record)
+        with open(file_path, 'rb') as f:
+            while True:
+                data = f.read(self.record_size)
+                if len(data) < self.record_size:
+                    break
+                
+                record = DynamicRecord.unpack(self.table_schema, data)
+                if not record.deleted:
+                    record_dict = {}
+                    for col in self.table_schema:
+                        record_dict[col.name] = getattr(record, col.name)
+                    records.append(record_dict)
         
-        if os.path.exists(self.aux_filename):
-            with open(self.aux_filename, 'rb') as f:
-                while True:
-                    size_data = f.read(4)
-                    if len(size_data) != 4:
-                        break
-                    
-                    record_size = struct.unpack('I', size_data)[0]
-                    record_data = f.read(record_size)
-                    
-                    if len(record_data) != record_size:
-                        break
-                    
-                    record, is_deleted = self._bytes_to_record(record_data)
-                    if not is_deleted:
-                        records.append(record)
-        
-        records.sort(key=lambda x: x[self.column_name])
         return records
     
-    def _write_record(self, filename: str, record: Dict[str, Any], deleted: bool = False):
-        record_bytes = self._record_to_bytes(record, deleted)
-        with open(filename, 'ab') as f:
-            f.write(struct.pack('I', len(record_bytes)))
-            f.write(record_bytes)
+    def _write_all_records_to_file(self, file_path: str, records: List[Dict[str, Any]]) -> bool:
+        with open(file_path, 'wb') as f:
+            for record_data in records:
+                record = DynamicRecord(self.table_schema, **record_data)
+                packed_data = record.pack()
+                f.write(packed_data)
+        return True
     
-    def _write_record_at_position(self, filename: str, position: int, record: Dict[str, Any]):
-        record_bytes = self._record_to_bytes(record, deleted=False)
-        with open(filename, 'r+b') as f:
-            f.seek(position)
-            current_size_data = f.read(4)
-            if len(current_size_data) == 4:
-                current_size = struct.unpack('I', current_size_data)[0]
-                new_size = len(record_bytes)
-                
-                if new_size <= current_size:
-                    f.seek(position)
-                    f.write(struct.pack('I', new_size))
-                    f.write(record_bytes)
-                    remaining = current_size - new_size
-                    if remaining > 0:
-                        f.write(b'\x00' * remaining)
-                else:
-                    f.seek(position + 1)
-                    f.write(b'\x01')
-                    self.free_positions.append(position)
-                    self._write_record(self.aux_filename, record)
+    def _get_aux_count(self) -> int:
+        if not os.path.exists(self.aux_file):
+            return 0
+        
+        file_size = os.path.getsize(self.aux_file)
+        return file_size // self.record_size
     
+    def get_all_records(self) -> List[Dict[str, Any]]:
+        all_records = []
+        
+        main_records = self._read_records_from_file(self.main_file)
+        all_records.extend(main_records)
+        
+        aux_records = self._read_records_from_file(self.aux_file)
+        all_records.extend(aux_records)
+        
+        return all_records
+    
+    def clear_all_records(self) -> bool:
+        with open(self.main_file, 'wb') as f:
+            pass
+        
+        with open(self.aux_file, 'wb') as f:
+            pass
+        
+        self._main_record_count = 0
+        
+        return True
+        
     def search(self, key: Any) -> List[Dict[str, Any]]:
-        records = self._read_all_records()
         results = []
         
-        left, right = 0, len(records) - 1
-        found_index = -1
+        if os.path.exists(self.main_file):
+            total_records = self._main_record_count
+            if total_records > 0:
+                left, right = 0, total_records - 1
+                found_position = -1
+                
+                while left <= right:
+                    mid = (left + right) // 2
+                    mid_record = self._read_record_at_position(self.main_file, mid)
+                    
+                    if mid_record is None:
+                        break
+                    
+                    mid_key = mid_record[self.column_name]
+                    
+                    if mid_key == key:
+                        found_position = mid
+                        break
+                    elif mid_key < key:
+                        left = mid + 1
+                    else:
+                        right = mid - 1
+                
+                if found_position != -1:
+                    found_record = self._read_record_at_position(self.main_file, found_position)
+                    if found_record:
+                        results.append(found_record)
+                    
+                    pos = found_position - 1
+                    while pos >= 0:
+                        record = self._read_record_at_position(self.main_file, pos)
+                        if record and record[self.column_name] == key:
+                            results.insert(0, record)
+                            pos -= 1
+                        else:
+                            break
+                    
+                    pos = found_position + 1
+                    while pos < total_records:
+                        record = self._read_record_at_position(self.main_file, pos)
+                        if record and record[self.column_name] == key:
+                            results.append(record)
+                            pos += 1
+                        else:
+                            break
         
-        while left <= right:
-            mid = (left + right) // 2
-            mid_key = records[mid][self.column_name]
-            
-            if mid_key == key:
-                found_index = mid
-                break
-            elif mid_key < key:
-                left = mid + 1
-            else:
-                right = mid - 1
-        
-        if found_index != -1:
-            i = found_index
-            while i >= 0 and records[i][self.column_name] == key:
-                results.append(records[i])
-                i -= 1
-            
-            i = found_index + 1
-            while i < len(records) and records[i][self.column_name] == key:
-                results.append(records[i])
-                i += 1
+        aux_records = self._read_records_from_file(self.aux_file)
+        for record in aux_records:
+            if record[self.column_name] == key:
+                results.append(record)
         
         return results
-
+    
+    def _read_record_at_position(self, file_path: str, position: int) -> Optional[Dict[str, Any]]:
+        if not os.path.exists(file_path):
+            return None
+        
+        with open(file_path, 'rb') as f:
+            f.seek(position * self.record_size)
+            data = f.read(self.record_size)
+            
+            if len(data) < self.record_size:
+                return None
+            
+            record = DynamicRecord.unpack(self.table_schema, data)
+            if record.deleted:
+                return None
+            
+            record_dict = {}
+            for col in self.table_schema:
+                record_dict[col.name] = getattr(record, col.name)
+            
+            return record_dict
+    
     def rangeSearch(self, begin_key: Any, end_key: Any) -> List[Dict[str, Any]]:
-        records = self._read_all_records()
         results = []
         
-        left, right = 0, len(records) - 1
-        start_index = len(records)
-        while left <= right:
-            mid = (left + right) // 2
-            mid_key = records[mid][self.column_name]
-            if mid_key < begin_key:
-                left = mid + 1
-            else:
-                start_index = mid
-                right = mid - 1
+        if os.path.exists(self.main_file):
+            total_records = self._main_record_count
+            if total_records > 0:
+                left, right = 0, total_records - 1
+                start_pos = -1
+                
+                while left <= right:
+                    mid = (left + right) // 2
+                    record = self._read_record_at_position(self.main_file, mid)
+                    
+                    if record is None:
+                        break
+                    
+                    mid_key = record[self.column_name]
+                    
+                    if mid_key >= begin_key:
+                        start_pos = mid
+                        right = mid - 1
+                    else:
+                        left = mid + 1
+                
+                left, right = 0, total_records - 1
+                end_pos = -1
+                
+                while left <= right:
+                    mid = (left + right) // 2
+                    record = self._read_record_at_position(self.main_file, mid)
+                    
+                    if record is None:
+                        break
+                    
+                    mid_key = record[self.column_name]
+                    
+                    if mid_key <= end_key:
+                        end_pos = mid
+                        left = mid + 1
+                    else:
+                        right = mid - 1
+                
+                if start_pos != -1 and end_pos != -1 and start_pos <= end_pos:
+                    for pos in range(start_pos, end_pos + 1):
+                        record = self._read_record_at_position(self.main_file, pos)
+                        if record:
+                            results.append(record)
         
-        i = start_index
-        while i < len(records):
-            record_key = records[i][self.column_name]
-            if record_key > end_key:
-                break
-            if begin_key <= record_key <= end_key:
-                results.append(records[i])
-            i += 1
+        aux_records = self._read_records_from_file(self.aux_file)
+        for record in aux_records:
+            key_value = record[self.column_name]
+            if begin_key <= key_value <= end_key:
+                results.append(record)
         
         return results
-
+    
     def add(self, record: Dict[str, Any]) -> bool:
         if self.column_name not in record:
             return False
         
-        if self.free_positions:
-            position = self.free_positions.pop(0)
-            self._write_record_at_position(self.filename, position, record)
-            self._save_free_list()
-        else:
-            self._write_record(self.aux_filename, record)
+        self._write_record_to_file(self.aux_file, record)
         
-        if not self.free_positions:
-            count = 0
-            if os.path.exists(self.aux_filename):
-                file_size = os.path.getsize(self.aux_filename)
-                if file_size < 1000:
-                    with open(self.aux_filename, 'rb') as f:
-                        while True:
-                            size_data = f.read(4)
-                            if len(size_data) != 4:
-                                break
-                            record_size = struct.unpack('I', size_data)[0]
-                            f.seek(f.tell() + record_size)
-                            count += 1
-                else:
-                    count = file_size // 50
+        aux_count = self._get_aux_count()
+        if aux_count >= self.max_auxiliary_records:
+            self._reconstruct_file()
             
-            if count >= self.max_aux_records:
-                all_records = self._read_all_records()
-                
-                if os.path.exists(self.filename):
-                    os.remove(self.filename)
-                if os.path.exists(self.aux_filename):
-                    os.remove(self.aux_filename)
-                
-                for rec in all_records:
-                    self._write_record(self.filename, rec)
-                
-                self.free_positions = []
-                self._save_free_list()
-        
         return True
-
-    def remove(self, key: Any) -> bool:
-        found = False
-        
-        if os.path.exists(self.filename):
-            found = self._mark_deleted_in_file(self.filename, key) or found
-            
-        if os.path.exists(self.aux_filename):
-            found = self._mark_deleted_in_file(self.aux_filename, key) or found
-        
-        if found:
-            self._save_free_list()
-        
-        return found
     
-    def _mark_deleted_in_file(self, filename: str, key: Any) -> bool:
-        found = False
+    def _reconstruct_file(self):
+        main_records = self._read_records_from_file(self.main_file)
+        aux_records = self._read_records_from_file(self.aux_file)
         
-        with open(filename, 'r+b') as f:
-            while True:
-                position = f.tell()
-                size_data = f.read(4)
-                if len(size_data) != 4:
-                    break
-                
-                record_size = struct.unpack('I', size_data)[0]
-                record_data = f.read(record_size)
-                
-                if len(record_data) != record_size:
-                    break
-                
-                record, is_deleted = self._bytes_to_record(record_data)
-                
-                if not is_deleted and record[self.column_name] == key:
-                    f.seek(position + 4 + 1)
-                    f.write(b'\x01')
-                    
-                    self.free_positions.append(position)
-                    found = True
+        all_records = main_records + aux_records
+        all_records.sort(key=lambda x: x[self.column_name])
         
-        return found
+        self._write_all_records_to_file(self.main_file, all_records)
+        
+        self._main_record_count += len(aux_records)
+        
+        with open(self.aux_file, 'wb') as f:
+            pass
+    
+    def remove(self, key: Any) -> bool:
+        removed_count = 0
+        
+        main_records = self._read_records_from_file(self.main_file)
+        filtered_main = [r for r in main_records if r[self.column_name] != key]
+        main_removed = len(main_records) - len(filtered_main)
+        removed_count += main_removed
+        
+        if main_removed > 0:
+            self._write_all_records_to_file(self.main_file, filtered_main)
+            self._main_record_count -= main_removed
+        
+        aux_records = self._read_records_from_file(self.aux_file)
+        filtered_aux = [r for r in aux_records if r[self.column_name] != key]
+        aux_removed = len(aux_records) - len(filtered_aux)
+        removed_count += aux_removed
+        
+        if aux_removed > 0:
+            self._write_all_records_to_file(self.aux_file, filtered_aux)
+        
+        return removed_count > 0
