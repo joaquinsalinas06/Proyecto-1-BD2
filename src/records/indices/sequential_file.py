@@ -3,10 +3,11 @@ import struct
 from typing import List, Dict, Any, Optional
 from .base_index import BaseIndex
 from ..record import DynamicRecord
+from ...parser.ast import ColumnDef
 
 
 class SequentialFileIndex(BaseIndex):
-    def __init__(self, column_name: str, table_schema: List, filename: str = None, max_auxiliary_records: int = 5):
+    def __init__(self, column_name: str, table_schema: List[ColumnDef], filename: str = None, max_auxiliary_records: int = 5):
         super().__init__(column_name, filename)
         self.table_schema = table_schema
         self.max_auxiliary_records = max_auxiliary_records
@@ -15,7 +16,7 @@ class SequentialFileIndex(BaseIndex):
         self.record_size = struct.calcsize(temp_record)
         
         self.main_file = filename or f"{column_name}_main.dat"
-        self.aux_file = filename.replace('.dat', '_aux.dat') if filename else f"{column_name}_aux.dat"
+        self.aux_file = filename.replace('.dat', '_aux.dat') if isinstance(filename, str) else f"{column_name}_aux.dat"
         
         self._ensure_files_exist()
         
@@ -253,7 +254,7 @@ class SequentialFileIndex(BaseIndex):
         
         self._write_all_records_to_file(self.main_file, all_records)
         
-        self._main_record_count += len(aux_records)
+        self._main_record_count = len(all_records)
         
         with open(self.aux_file, 'wb') as f:
             pass
