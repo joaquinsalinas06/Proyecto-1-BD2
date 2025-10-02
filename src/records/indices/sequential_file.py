@@ -1,258 +1,282 @@
 import os
 import struct
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from .base_index import BaseIndex
 from ..record import DynamicRecord
+from ...parser.ast import ColumnDef
 
 
 class SequentialFileIndex(BaseIndex):
-    def __init__(self, column_name: str, filename: str = None):
+    def __init__(self, column_name: str, table_schema: List[ColumnDef], filename: str = None, max_auxiliary_records: int = 5):
         super().__init__(column_name, filename)
-        self.filename = filename or f"{column_name}_sequential.dat"
-        self.aux_filename = f"{column_name}_aux.dat"
-        self.records_cache = []
-        self.is_loaded = False
-        self.record_size = None
-        self.max_aux_records = 10  # Número máximo de registros auxiliares antes de reorganizar
+        self.table_schema = table_schema
+        self.max_auxiliary_records = max_auxiliary_records
         
-    def _ensure_loaded(self):
-        if not self.is_loaded:
-            self._load_records()
-            self.is_loaded = True
+        temp_record = DynamicRecord._build_format(table_schema)
+        self.record_size = struct.calcsize(temp_record)
+        
+        self.main_file = filename or f"{column_name}_main.dat"
+        self.aux_file = filename.replace('.dat', '_aux.dat') if isinstance(filename, str) else f"{column_name}_aux.dat"
+        
+        self._ensure_files_exist()
+        
+        self._main_record_count = self._initialize_main_count()
     
-    def _load_records(self):
-        self.records_cache = []
-        
-        if os.path.exists(self.filename):
-            with open(self.filename, 'rb') as f:
-                while True:
-                    try:
-                        # Leer tamaño del registro
-                        size_data = f.read(4)
-                        if not size_data:
-                            break
-                        
-                        record_size = struct.unpack('I', size_data)[0]
-                        record_data = f.read(record_size)
-                        
-                        if len(record_data) != record_size:
-                            break
-                            
-                        record_dict = self._deserialize_record(record_data)
-                        if not record_dict.get('deleted', False):
-                            self.records_cache.append(record_dict)
-                            
-                    except (struct.error, EOFError):
-                        break
-        
-        if os.path.exists(self.aux_filename):
-            with open(self.aux_filename, 'rb') as f:
-                while True:
-                    try:
-                        size_data = f.read(4)
-                        if not size_data:
-                            break
-                        
-                        record_size = struct.unpack('I', size_data)[0]
-                        record_data = f.read(record_size)
-                        
-                        if len(record_data) != record_size:
-                            break
-                            
-                        record_dict = self._deserialize_record(record_data)
-                        if not record_dict.get('deleted', False):
-                            self.records_cache.append(record_dict)
-                            
-                    except (struct.error, EOFError):
-                        break
-        
-        # Ordenar registros por la columna clave
-        self.records_cache.sort(key=lambda x: self._get_sort_key(x[self.column_name]))
+    def _ensure_files_exist(self):
+        for file_path in [self.main_file, self.aux_file]:
+            if not os.path.exists(file_path):
+                with open(file_path, 'wb') as f:
+                    pass
     
-    def _get_sort_key(self, value):
-        if isinstance(value, (int, float)):
-            return value
-        elif isinstance(value, str):
-            return value.lower()
-        elif isinstance(value, list):
-            return tuple(value) if value else ()
-        else:
-            return str(value)
-    
-    #Es como un pack, pero mas general
-    def _serialize_record(self, record: Dict[str, Any]) -> bytes:
-        import pickle
-        return pickle.dumps(record)
-    #Es el unpack
-    def _deserialize_record(self, data: bytes) -> Dict[str, Any]:
-        import pickle
-        return pickle.loads(data)
-    
-    def _write_record_to_file(self, filename: str, record: Dict[str, Any]):
-        record_data = self._serialize_record(record)
-        with open(filename, 'ab') as f:
-            f.write(struct.pack('I', len(record_data)))
-            f.write(record_data)
-    
-    def _binary_search(self, target_key) -> int:
-        self._ensure_loaded()
-        
-        left, right = 0, len(self.records_cache) - 1
-        target_sort_key = self._get_sort_key(target_key)
-        
-        while left <= right:
-            mid = (left + right) // 2
-            mid_key = self._get_sort_key(self.records_cache[mid][self.column_name])
-            
-            if mid_key == target_sort_key:
-                return mid
-            elif mid_key < target_sort_key:
-                left = mid + 1
-            else:
-                right = mid - 1
-        
-        return -1
-    
-    def _find_insertion_point(self, target_key) -> int:
-        self._ensure_loaded()
-        
-        left, right = 0, len(self.records_cache)
-        target_sort_key = self._get_sort_key(target_key)
-        
-        while left < right:
-            mid = (left + right) // 2
-            mid_key = self._get_sort_key(self.records_cache[mid][self.column_name])
-            
-            if mid_key < target_sort_key:
-                left = mid + 1
-            else:
-                right = mid
-        
-        return left
-    #A partir de aqui vienen las operaciones clasicas 
-    def search(self, key: Any) -> List[Dict[str, Any]]:
-        self._ensure_loaded()
-        
-        index = self._binary_search(key)
-        if index == -1:
-            return []
-        
-        results = []
-        target_sort_key = self._get_sort_key(key)
-        
-        i = index
-        while i >= 0 and self._get_sort_key(self.records_cache[i][self.column_name]) == target_sort_key:
-            results.append(self.records_cache[i].copy())
-            i -= 1
-        
-        i = index + 1
-        while i < len(self.records_cache) and self._get_sort_key(self.records_cache[i][self.column_name]) == target_sort_key:
-            results.append(self.records_cache[i].copy())
-            i += 1
-        
-        return results
-
-    def rangeSearch(self, begin_key: Any, end_key: Any) -> List[Dict[str, Any]]:
-        self._ensure_loaded()
-        
-        results = []
-        begin_sort_key = self._get_sort_key(begin_key)
-        end_sort_key = self._get_sort_key(end_key)
-        
-        for record in self.records_cache:
-            record_key = self._get_sort_key(record[self.column_name])
-            if begin_sort_key <= record_key <= end_sort_key:
-                results.append(record.copy())
-            elif record_key > end_sort_key:
-                break 
-        
-        return results
-
-    def add(self, record: Dict[str, Any]) -> bool:
-        try:
-            self._ensure_loaded()
-            
-            if self.column_name not in record:
-                raise ValueError(f"El registro debe contener la columna '{self.column_name}'")
-            
-            self._write_record_to_file(self.aux_filename, record)
-            
-            insertion_point = self._find_insertion_point(record[self.column_name])
-            self.records_cache.insert(insertion_point, record.copy())
-            
-            if self._count_aux_records() >= self.max_aux_records:
-                self._reorganize_files()
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error añadiendo registro: {e}")
-            return False
-    
-    def _count_aux_records(self) -> int:
-        if not os.path.exists(self.aux_filename):
+    def _initialize_main_count(self) -> int:
+        if not os.path.exists(self.main_file):
             return 0
         
-        count = 0
-        try:
-            with open(self.aux_filename, 'rb') as f:
-                while True:
-                    size_data = f.read(4)
-                    if not size_data:
+        file_size = os.path.getsize(self.main_file)
+        return file_size // self.record_size
+    
+    def _write_record_to_file(self, file_path: str, record_data: Dict[str, Any]) -> bool:
+        record = DynamicRecord(self.table_schema, **record_data)
+        packed_data = record.pack()
+        
+        with open(file_path, 'ab') as f:
+            f.write(packed_data)
+        return True
+    
+    def _read_records_from_file(self, file_path: str) -> List[Dict[str, Any]]:
+        records = []
+        if not os.path.exists(file_path):
+            return records
+        
+        with open(file_path, 'rb') as f:
+            while True:
+                data = f.read(self.record_size)
+                if len(data) < self.record_size:
+                    break
+                
+                record = DynamicRecord.unpack(self.table_schema, data)
+                if not record.deleted:
+                    record_dict = {}
+                    for col in self.table_schema:
+                        record_dict[col.name] = getattr(record, col.name)
+                    records.append(record_dict)
+        
+        return records
+    
+    def _write_all_records_to_file(self, file_path: str, records: List[Dict[str, Any]]) -> bool:
+        with open(file_path, 'wb') as f:
+            for record_data in records:
+                record = DynamicRecord(self.table_schema, **record_data)
+                packed_data = record.pack()
+                f.write(packed_data)
+        return True
+    
+    def _get_aux_count(self) -> int:
+        if not os.path.exists(self.aux_file):
+            return 0
+        
+        file_size = os.path.getsize(self.aux_file)
+        return file_size // self.record_size
+    
+    def get_all_records(self) -> List[Dict[str, Any]]:
+        all_records = []
+        
+        main_records = self._read_records_from_file(self.main_file)
+        all_records.extend(main_records)
+        
+        aux_records = self._read_records_from_file(self.aux_file)
+        all_records.extend(aux_records)
+        
+        return all_records
+    
+    def clear_all_records(self) -> bool:
+        with open(self.main_file, 'wb') as f:
+            pass
+        
+        with open(self.aux_file, 'wb') as f:
+            pass
+        
+        self._main_record_count = 0
+        
+        return True
+        
+    def search(self, key: Any) -> List[Dict[str, Any]]:
+        results = []
+        
+        if os.path.exists(self.main_file):
+            total_records = self._main_record_count
+            if total_records > 0:
+                left, right = 0, total_records - 1
+                found_position = -1
+                
+                while left <= right:
+                    mid = (left + right) // 2
+                    mid_record = self._read_record_at_position(self.main_file, mid)
+                    
+                    if mid_record is None:
                         break
                     
-                    record_size = struct.unpack('I', size_data)[0]
-                    f.seek(f.tell() + record_size)
-                    count += 1
+                    mid_key = mid_record[self.column_name]
                     
-        except (struct.error, EOFError):
-            pass
-            
-        return count
-    
-    def _reorganize_files(self):
-        try:
-            temp_filename = f"{self.column_name}_temp.dat"
-            
-            with open(temp_filename, 'wb') as temp_file:
-                for record in self.records_cache:
-                    if not record.get('deleted', False):
-                        record_data = self._serialize_record(record)
-                        temp_file.write(struct.pack('I', len(record_data)))
-                        temp_file.write(record_data)
-            
-            if os.path.exists(self.filename):
-                os.remove(self.filename)
-            os.rename(temp_filename, self.filename)
-            
-            if os.path.exists(self.aux_filename):
-                os.remove(self.aux_filename)
+                    if mid_key == key:
+                        found_position = mid
+                        break
+                    elif mid_key < key:
+                        left = mid + 1
+                    else:
+                        right = mid - 1
                 
-        except Exception as e:
-            print(f"Error reorganizando archivos: {e}")
-
-    def remove(self, key: Any) -> bool:
-        try:
-            self._ensure_loaded()
+                if found_position != -1:
+                    found_record = self._read_record_at_position(self.main_file, found_position)
+                    if found_record:
+                        results.append(found_record)
+                    
+                    pos = found_position - 1
+                    while pos >= 0:
+                        record = self._read_record_at_position(self.main_file, pos)
+                        if record and record[self.column_name] == key:
+                            results.insert(0, record)
+                            pos -= 1
+                        else:
+                            break
+                    
+                    pos = found_position + 1
+                    while pos < total_records:
+                        record = self._read_record_at_position(self.main_file, pos)
+                        if record and record[self.column_name] == key:
+                            results.append(record)
+                            pos += 1
+                        else:
+                            break
+        
+        aux_records = self._read_records_from_file(self.aux_file)
+        for record in aux_records:
+            if record[self.column_name] == key:
+                results.append(record)
+        
+        return results
+    
+    def _read_record_at_position(self, file_path: str, position: int) -> Optional[Dict[str, Any]]:
+        if not os.path.exists(file_path):
+            return None
+        
+        with open(file_path, 'rb') as f:
+            f.seek(position * self.record_size)
+            data = f.read(self.record_size)
             
-            removed_count = 0
-            target_sort_key = self._get_sort_key(key)
+            if len(data) < self.record_size:
+                return None
             
-            i = 0
-            while i < len(self.records_cache):
-                record_key = self._get_sort_key(self.records_cache[i][self.column_name])
-                if record_key == target_sort_key:
-                    self.records_cache[i]['deleted'] = True
-                    removed_count += 1
-                i += 1
+            record = DynamicRecord.unpack(self.table_schema, data)
+            if record.deleted:
+                return None
             
-            self.records_cache = [r for r in self.records_cache if not r.get('deleted', False)]
+            record_dict = {}
+            for col in self.table_schema:
+                record_dict[col.name] = getattr(record, col.name)
             
-            if removed_count > 0:
-                self._reorganize_files()
-            
-            return removed_count > 0
-            
-        except Exception as e:
-            print(f"Error eliminando registro: {e}")
+            return record_dict
+    
+    def rangeSearch(self, begin_key: Any, end_key: Any) -> List[Dict[str, Any]]:
+        results = []
+        
+        if os.path.exists(self.main_file):
+            total_records = self._main_record_count
+            if total_records > 0:
+                left, right = 0, total_records - 1
+                start_pos = -1
+                
+                while left <= right:
+                    mid = (left + right) // 2
+                    record = self._read_record_at_position(self.main_file, mid)
+                    
+                    if record is None:
+                        break
+                    
+                    mid_key = record[self.column_name]
+                    
+                    if mid_key >= begin_key:
+                        start_pos = mid
+                        right = mid - 1
+                    else:
+                        left = mid + 1
+                
+                left, right = 0, total_records - 1
+                end_pos = -1
+                
+                while left <= right:
+                    mid = (left + right) // 2
+                    record = self._read_record_at_position(self.main_file, mid)
+                    
+                    if record is None:
+                        break
+                    
+                    mid_key = record[self.column_name]
+                    
+                    if mid_key <= end_key:
+                        end_pos = mid
+                        left = mid + 1
+                    else:
+                        right = mid - 1
+                
+                if start_pos != -1 and end_pos != -1 and start_pos <= end_pos:
+                    for pos in range(start_pos, end_pos + 1):
+                        record = self._read_record_at_position(self.main_file, pos)
+                        if record:
+                            results.append(record)
+        
+        aux_records = self._read_records_from_file(self.aux_file)
+        for record in aux_records:
+            key_value = record[self.column_name]
+            if begin_key <= key_value <= end_key:
+                results.append(record)
+        
+        return results
+    
+    def add(self, record: Dict[str, Any]) -> bool:
+        if self.column_name not in record:
             return False
+        
+        self._write_record_to_file(self.aux_file, record)
+        
+        aux_count = self._get_aux_count()
+        if aux_count >= self.max_auxiliary_records:
+            self._reconstruct_file()
+            
+        return True
+    
+    def _reconstruct_file(self):
+        main_records = self._read_records_from_file(self.main_file)
+        aux_records = self._read_records_from_file(self.aux_file)
+        
+        all_records = main_records + aux_records
+        all_records.sort(key=lambda x: x[self.column_name])
+        
+        self._write_all_records_to_file(self.main_file, all_records)
+        
+        self._main_record_count = len(all_records)
+        
+        with open(self.aux_file, 'wb') as f:
+            pass
+    
+    def remove(self, key: Any) -> bool:
+        removed_count = 0
+        
+        main_records = self._read_records_from_file(self.main_file)
+        filtered_main = [r for r in main_records if r[self.column_name] != key]
+        main_removed = len(main_records) - len(filtered_main)
+        removed_count += main_removed
+        
+        if main_removed > 0:
+            self._write_all_records_to_file(self.main_file, filtered_main)
+            self._main_record_count -= main_removed
+        
+        aux_records = self._read_records_from_file(self.aux_file)
+        filtered_aux = [r for r in aux_records if r[self.column_name] != key]
+        aux_removed = len(aux_records) - len(filtered_aux)
+        removed_count += aux_removed
+        
+        if aux_removed > 0:
+            self._write_all_records_to_file(self.aux_file, filtered_aux)
+        
+        return removed_count > 0
