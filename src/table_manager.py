@@ -12,7 +12,13 @@ from .parser.sql_parser import SQLParser
 from .records import DynamicRecord
 from .records.indices import create_index
 
+'''
+La clase Table representa una tabla en la base de datos, con su esquema y sus índices, de tal forma
+que siempre tenemos conocimiento a los datos de dicha tabla, como nombre, columnas, tipos de datos, etc.
 
+create_record_from_values: Dada una lista de valores, crea un DynamicRecord con los valores asignados a las columnas
+get_primary_index: Retorna el índice primario de la tabla, si no existe lanza un error
+'''
 class Table:
     def __init__(self, name: str, columns: List[ColumnDef]):
         self.name = name
@@ -20,7 +26,6 @@ class Table:
         self.column_names = [col.name for col in columns]
         self.schema = columns 
 
-        self.records = []
         self.indexes = {}
 
         self.key_column = None
@@ -42,8 +47,10 @@ class Table:
 
         return DynamicRecord(self.schema, **kwargs)
     
-    def create_record_from_dict(self, data: Dict[str, Any]):
-        return DynamicRecord(self.schema, **data)
+    def get_primary_index(self):
+        if not self.key_column or self.key_column not in self.indexes:
+            raise ValueError(f"No hay índice primario para la tabla '{self.name}'")
+        return self.indexes[self.key_column]
 
 
 class TableManager:
@@ -131,7 +138,12 @@ class TableManager:
                 "type": "Error ejecutando sentencia",
                 "statement_type": type(stmt).__name__
             }
-
+        
+    '''
+    Por cada una de las columnas que tenemos, verificamos si tiene un indice asociado
+    aqui diferenciamos si es un indice primario o secundario
+    en caso identificamos una columna que es llave primaria pero no tiene indice, le asignamos un BTree por defecto
+    '''
     def create_table(self, table_name: str, columns: List[ColumnDef]):
         if table_name in self.tables:
             raise ValueError(f"La tabla '{table_name}' ya existe")
@@ -141,13 +153,32 @@ class TableManager:
         
         for col in table.columns:
             if col.index_type:
-                index = create_index(col.index_type, col.name)
+                index = create_index(
+                    col.index_type,
+                    col.name,
+                    filename=f"indices/{table.name}_{col.name}",
+                    is_primary=col.is_key,
+                    primary_key_column=table.key_column if not col.is_key else None,
+                    table_schema=table.columns
+                )
                 table.indexes[col.name] = index
             elif col.is_key and col.index_type is None:
                 col.index_type = IndexType.BTREE
-                index = create_index(col.index_type, col.name)
+                index = create_index(
+                    col.index_type,
+                    col.name,
+                    filename=f"indices/{table.name}_{col.name}",
+                    is_primary=True,
+                    primary_key_column=None,
+                    table_schema=table.columns
+                )
                 table.indexes[col.name] = index
 
+    '''
+    A partir de un archivo CSV, obtenemos la caberera y la primera fila para inferir los tipos de datos
+    Creamos las columnas y la tabla, y luego insertamos cada uno de los registros en la tabla
+    Ademas, por cada columna que tenga un indice, insertamos el registro en el indice
+    '''
     def create_table_from_file(self, table_name: str, file_path: str, 
                              index_type: IndexType, key_column: str):
         if table_name in self.tables:
@@ -191,43 +222,49 @@ class TableManager:
     
         table = Table(table_name, columns)
         self.tables[table_name] = table
-        
-        with open(file_path, 'r', encoding='utf-8') as file:
-            reader = csv.DictReader(file)
-            
-            for row in reader:
-                record = table.create_record_from_dict(row)
-                table.records.append(record)
-                
+
         for col in table.columns:
             if col.index_type:
-                index = create_index(col.index_type, col.name)
+                index = create_index(
+                    col.index_type,
+                    col.name,
+                    filename=f"indices/{table.name}_{col.name}",
+                    is_primary=col.is_key,
+                    primary_key_column=table.key_column if not col.is_key else None,
+                    table_schema=table.columns
+                )
                 table.indexes[col.name] = index
+                
+            for row in reader:
+                for _, index in table.indexes.items():
+                    if index is not None:
+                            index.add(row)
 
-    
+    '''
+    Insertamos un registro en la tabla, verificando que la tabla exista
+    Por cada columna que tenga un indice, insertamos el registro en el indice
+    '''
     def insert(self, table_name: str, values: List[Value]):
         if table_name not in self.tables:
             raise ValueError(f"La tabla '{table_name}' no existe")
         table = self.tables[table_name]
-        record = table.create_record_from_values(values)
-
-        # Agregar a la tabla
-        table.records.append(record)
-
-        # Agregar a los índices
         record_dict = {}
-        for col in table.columns:
-            record_dict[col.name] = getattr(record, col.name)
+        for col, value in zip(table.columns, values):
+            val = value.value
+            if hasattr(val, 'x') and hasattr(val, 'y'):
+                val = (val.x, val.y)
+            record_dict[col.name] = val
 
-        for col_name, index in table.indexes.items():
-            if index is not None:  # Solo si el índice fue creado exitosamente
-                try:
-                    index.add(record_dict)
-                except Exception as e:
-                    print(f"  [WARN] Error agregando a índice {col_name}: {e}")
+        for _, index in table.indexes.items():
+            if index is not None:
+                index.add(record_dict)
 
-        print(f"[OK] Registro insertado: {record}")
-    
+
+    '''
+    Al realizar una busqueda, verificaremos si es que existe algun tipo de condicion para filtrar los registros
+    luego si es que existe algun orden en especifico y finalmente si tenemos un limite de registros a retornar
+    Si se seleccionan todas las columnas, retornamos todos los registros, sino solo las columnas especificadas
+    '''
     def select(self, table_name: str, columns: List[str],
               where_condition: Optional[Condition] = None,
               order_by: Optional[str] = None,
@@ -239,216 +276,328 @@ class TableManager:
         table = self.tables[table_name]
 
         if where_condition:
-            filtered_records = self._filter_records_with_indexes(table, where_condition)
+            filtered_dicts = self._execute_condition(table, where_condition)
         else:
-            filtered_records = table.records.copy()
+            index = table.get_primary_index()
+            filtered_dicts = index.getAllRecords()
 
         if order_by:
-            try:
-                filtered_records.sort(
-                    key=lambda r: getattr(r, order_by),
-                    reverse=order_desc
-                )
-            except AttributeError:
-                raise ValueError(f"Columna '{order_by}' no encontrada")
+            filtered_dicts.sort(key=lambda d: d.get(order_by), reverse=order_desc)
 
         if limit:
-            filtered_records = filtered_records[:limit]
+            filtered_dicts = filtered_dicts[:limit]
 
-        result = []
-        for record in filtered_records:
-            if columns == ["*"]:
-                record_dict = {}
-                for col in table.columns:
-                    record_dict[col.name] = getattr(record, col.name)
-            else:
-                record_dict = {}
-                for col_name in columns:
-                    if hasattr(record, col_name):
-                        record_dict[col_name] = getattr(record, col_name)
-            result.append(record_dict)
+        if "*" in columns:
+            return filtered_dicts
 
-        return result
-    
+        res = []
+        for record in filtered_dicts:
+            selected = {col: record.get(col) for col in columns if col in record}
+            res.append(selected)
+
+        return res
+
+    '''
+    Si no existe un filtro de borrado, se eliminan todos los registros de la tabla
+    Si existe un filtro, se obtienen los registros a eliminar y por cada uno de ellos
+    se eliminan de los indices asociados a la tabla, en cada uno d elos indices y se devuelve
+    la cantidad de registros eliminados
+    '''
     def delete(self, table_name: str, where_condition: Optional[Condition] = None) -> int:
         if table_name not in self.tables:
             raise ValueError(f"La tabla '{table_name}' no existe")
         table = self.tables[table_name]
 
         if where_condition is None:
-            # Clear all records and indexes
-            deleted_count = len(table.records)
-            table.records.clear()
-
-            # Clear all indexes
             for col_name, index in table.indexes.items():
                 if index is not None:
-                    try:
-                        # seq_TODO: SequentialFileIndex needs clear_all() method
-                        # btree_TODO: BTreeIndex needs clear_all() method
-                        # hash_TODO: ExtendibleHashIndex needs clear_all() method
-                        # isam_TODO: ISAMIndex needs clear_all() method
-                        # rtree_TODO: RTreeIndex needs clear_all() method
-                        pass  # Placeholder - each index should implement clear_all()
-                    except Exception as e:
-                        print(f"  [WARN]  Error clearing index {col_name}: {e}")
+                    deleted_count = index.clear_all();
 
             return deleted_count
 
-        # DELETE with WHERE condition
-        records_to_delete = self._filter_records_with_indexes(table, where_condition)
+
+        records_to_delete = self._execute_condition(table, where_condition)
         deleted_count = 0
 
-        for record in records_to_delete:
-            # Remove from table
-            if record in table.records:
-                table.records.remove(record)
-                deleted_count += 1
-
-                # Remove from indexes
-                record_dict = {}
-                for col in table.columns:
-                    record_dict[col.name] = getattr(record, col.name)
-
-                for col_name, index in table.indexes.items():
-                    if index is not None:
-                        try:
-                            key = record_dict[col_name]
-                            index.remove(key)
-                        except Exception as e:
-                            print(f"  [WARN]  Error removing from index {col_name}: {e}")
-
+        for record_dict in records_to_delete:
+            deleted_count += 1
+            for col_name, index in table.indexes.items():
+                if index is not None:
+                    key = record_dict.get(col_name)
+                    index.remove(key)
         return deleted_count
 
-    def _filter_records_with_indexes(self, table: Table, condition: Condition) -> List:
+    '''
+    Este es el core de la obtencion de registros con condiciones
+    Dependiendo del tipo de condicion, se realiza la busqueda correspondiente
+    '''
+    def _execute_condition(self, table: Table, condition: Condition) -> List:
         if isinstance(condition, CompCond):
-            # Búsqueda por comparación: =, !=, <, <=, >, >=
-            column_name = condition.column
-            operator = condition.operator.value
-            value = condition.value.value
-
-            index = table.indexes.get(column_name)
-            if index is None:
-                print(f"  [WARN]  Sin índice para '{column_name}', búsqueda lineal")
-                return table.records.copy()  # Placeholder: devolver todos
-
-            try:
-                if operator == "=":
-                    # Búsqueda exacta
-                    results = index.search(value)
-                    # seq_TODO: SequentialFileIndex.search() implementar
-                    # btree_TODO: BTreeIndex.search() implementar
-                    # hash_TODO: ExtendibleHashIndex.search() implementar
-                    # isam_TODO: ISAMIndex.search() implementar
-
-                    # Por ahora devolver registros que coincidan (placeholder)
-                    return [r for r in table.records if getattr(r, column_name) == value]
-
-                elif operator in ["<", "<=", ">", ">="]:
-                    # Búsqueda por rango
-                    results = index.rangeSearch(None, None)  # Placeholder
-                    # seq_TODO: SequentialFileIndex.rangeSearch() implementar
-                    # btree_TODO: BTreeIndex.rangeSearch() implementar
-                    # isam_TODO: ISAMIndex.rangeSearch() implementar
-                    # hash_TODO: No soporta búsqueda por rango
-
-                    # Por ahora comparación directa (placeholder)
-                    if operator == "<":
-                        return [r for r in table.records if getattr(r, column_name) < value]
-                    elif operator == "<=":
-                        return [r for r in table.records if getattr(r, column_name) <= value]
-                    elif operator == ">":
-                        return [r for r in table.records if getattr(r, column_name) > value]
-                    elif operator == ">=":
-                        return [r for r in table.records if getattr(r, column_name) >= value]
-
-                elif operator == "!=":
-                    return [r for r in table.records if getattr(r, column_name) != value]
-
-            except Exception as e:
-                print(f"  [WARN]  Error en índice '{column_name}': {e}")
-                return table.records.copy()
+            return self._comparison_condition(table, condition)
 
         elif isinstance(condition, BetweenCond):
-            # Búsqueda BETWEEN
-            column_name = condition.column
-            start_value = condition.start_value.value
-            end_value = condition.end_value.value
-
-            index = table.indexes.get(column_name)
-            if index is None:
-                print(f"  [WARN]  Sin índice para '{column_name}', búsqueda lineal")
-                return [r for r in table.records if start_value <= getattr(r, column_name) <= end_value]
-
-            try:
-                results = index.rangeSearch(start_value, end_value)
-                # seq_TODO: SequentialFileIndex.rangeSearch() implementar
-                # btree_TODO: BTreeIndex.rangeSearch() implementar
-                # isam_TODO: ISAMIndex.rangeSearch() implementar
-
-                # Placeholder: comparación directa
-                return [r for r in table.records if start_value <= getattr(r, column_name) <= end_value]
-
-            except Exception as e:
-                print(f"  [WARN]  Error en índice '{column_name}': {e}")
-                return [r for r in table.records if start_value <= getattr(r, column_name) <= end_value]
+            return self._between_condition(table, condition)
 
         elif isinstance(condition, SpatialInCond):
-            # Búsqueda espacial IN (punto, radio)
-            column_name = condition.column
-            point = condition.point
-            radius = condition.radius
-
-            index = table.indexes.get(column_name)
-            if index is None:
-                print(f"  [WARN]  Sin índice espacial para '{column_name}'")
-                return []  # Placeholder
-
-            try:
-                results = index.rangeSearch((point.x, point.y), radius)
-                # rtree_TODO: RTreeIndex.rangeSearch() espacial implementar
-                return []  # Placeholder
-
-            except Exception as e:
-                print(f"  [WARN]  Error en índice espacial '{column_name}': {e}")
-                return []
+            return self._spatial_in_condition(table, condition)
 
         elif isinstance(condition, SpatialKNNCond):
-            # Búsqueda KNN
-            column_name = condition.column
-            point = condition.point
-            k = condition.k
-
-            index = table.indexes.get(column_name)
-            if index is None:
-                print(f"  [WARN]  Sin índice espacial para '{column_name}'")
-                return []  # Placeholder
-
-            try:
-                results = index.knnSearch((point.x, point.y), k)
-                # rtree_TODO: RTreeIndex.knnSearch() implementar
-                return []  # Placeholder
-
-            except Exception as e:
-                print(f"  [WARN]  Error en KNN '{column_name}': {e}")
-                return []
+            return self._spatial_knn_condition(table, condition)
 
         elif isinstance(condition, LogicCond):
-            # AND/OR
-            left_results = self._filter_records_with_indexes(table, condition.left)
-            right_results = self._filter_records_with_indexes(table, condition.right)
+            return self._logic_condition(table, condition)
 
-            if condition.operator.value == "AND":
-                return [r for r in left_results if r in right_results]
-            elif condition.operator.value == "OR":
-                combined = left_results.copy()
-                for r in right_results:
-                    if r not in combined:
-                        combined.append(r)
-                return combined
+        return table.get_primary_index().getAllRecords()
 
-        # Fallback: devolver todos los registros
-        print(f"  [WARN]  Tipo de condición no soportado: {type(condition)}")
-        return table.records.copy()
+    '''
+    Aqui se aprovechan principalmente los indices para realizar las busquedas
+    Si no existe un indice para la columna, se realiza un escaneo completo de la tabla y se filtran los datos
+    En el caso de los indices secundarios, se obtiene una referencia (la llave primaria) y se vuelve a realizar
+    una busqueda en el indice primario para obtener el registro completo
+    '''
+    def _comparison_condition(self, table: Table, condition: CompCond) -> List:
+        column_name = condition.column
+        operator = condition.operator.value
+        search_value = condition.value.value
 
+        index = table.indexes.get(column_name)
 
+        if index is None:
+            all_records = table.get_primary_index().getAllRecords()
+            matching_records = []
+            for record in all_records:
+                record_value = record.get(column_name)
+                match = False
+
+                if operator == "=" and record_value == search_value:
+                    match = True
+                elif operator == "!=" and record_value != search_value:
+                    match = True
+                elif operator == "<" and record_value < search_value:
+                    match = True
+                elif operator == "<=" and record_value <= search_value:
+                    match = True
+                elif operator == ">" and record_value > search_value:
+                    match = True
+                elif operator == ">=" and record_value >= search_value:
+                    match = True
+
+                if match:
+                    matching_records.append(record)
+
+            return matching_records
+
+        try:
+            if operator == "=":
+                index_results = index.search(search_value)
+            elif operator == "<":
+                index_results = index.rangeSearch(None, search_value, begin_inclusive=True, end_inclusive=False)
+            elif operator == "<=":
+                index_results = index.rangeSearch(None, search_value, begin_inclusive=True, end_inclusive=True)
+            elif operator == ">":
+                index_results = index.rangeSearch(search_value, None, begin_inclusive=False, end_inclusive=True)
+            elif operator == ">=":
+                index_results = index.rangeSearch(search_value, None, begin_inclusive=True, end_inclusive=True)
+            elif operator == "!=":
+                all_records = index.getAllRecords()
+                filtered_records = []
+                for record in all_records:
+                    if record.get(index.column_name) != search_value:
+                        filtered_records.append(record)
+                return filtered_records
+            else:
+                raise ValueError(f"Operador no soportado {operator}")
+
+            if index.is_primary:
+                return index_results
+            
+            if not table.key_column:
+                return []
+
+            primary_key_values = []
+            for reference in index_results:
+                if table.key_column in reference:
+                    pk_value = reference.get(table.key_column)
+                    primary_key_values.append(pk_value)
+
+            primary_index = table.indexes.get(table.key_column)
+            if primary_index:
+                full_records = []
+                for pk_value in primary_key_values:
+                    records = primary_index.search(pk_value)
+                    full_records.extend(records)
+                return full_records
+
+            all_records = table.get_primary_index().getAllRecords()
+            matching_records = []
+            for record in all_records:
+                if record.get(table.key_column) in primary_key_values:
+                    matching_records.append(record)
+            return matching_records
+
+        except Exception:
+            all_records = table.get_primary_index().getAllRecords()
+            matching_records = []
+            for record in all_records:
+                record_value = record.get(column_name)
+                match = False
+
+                if operator == "=" and record_value == search_value:
+                    match = True
+                elif operator == "!=" and record_value != search_value:
+                    match = True
+                elif operator == "<" and record_value < search_value:
+                    match = True
+                elif operator == "<=" and record_value <= search_value:
+                    match = True
+                elif operator == ">" and record_value > search_value:
+                    match = True
+                elif operator == ">=" and record_value >= search_value:
+                    match = True
+
+                if match:
+                    matching_records.append(record)
+
+            return matching_records
+
+    '''
+    Aqui aprovechamos principalmete el range search de los indices (Hash no soporta range search y RTree usa un tipo de rango espacial)
+    Nuevamente si no existe indice se toman todos los registros y si es secundario se obtienen las referencias para buscar en el primario
+    '''
+    def _between_condition(self, table: Table, condition: BetweenCond) -> List:
+        column_name = condition.column
+        start_value = condition.start_value.value
+        end_value = condition.end_value.value
+
+        index = table.indexes.get(column_name)
+
+        if index is None:
+            all_records = table.get_primary_index().getAllRecords()
+            matching_records = []
+            for record in all_records:
+                record_value = record.get(column_name)
+                if start_value <= record_value <= end_value:
+                    matching_records.append(record)
+            return matching_records
+
+        try:
+            index_results = index.rangeSearch(start_value, end_value, begin_inclusive=True, end_inclusive=True)
+
+            if index.is_primary:
+                return index_results
+
+            if not table.key_column:
+                return []
+
+            primary_key_values = []
+            for reference in index_results:
+                if table.key_column in reference:
+                    pk_value = reference.get(table.key_column)
+                    primary_key_values.append(pk_value)
+
+            primary_index = table.indexes.get(table.key_column)
+            if primary_index:
+                full_records = []
+                for pk_value in primary_key_values:
+                    records = primary_index.search(pk_value)
+                    full_records.extend(records)
+                return full_records
+
+            all_records = table.get_primary_index().getAllRecords()
+            matching_records = []
+            for record in all_records:
+                if record.get(table.key_column) in primary_key_values:
+                    matching_records.append(record)
+            return matching_records
+
+        except Exception:
+
+            all_records = table.get_primary_index().getAllRecords()
+            matching_records = []
+            for record in all_records:
+                record_value = record.get(column_name)
+                if start_value <= record_value <= end_value:
+                    matching_records.append(record)
+            return matching_records
+
+    '''
+    Esta busqueda es exclusiva de los indices espaciales (RTree), en este caso se le brinda un punto y un radio
+    y mediante el metodo rangeSearch del indice, se obtienen las referencias a los registros que cumplen con la condicion
+    Luego se busca en el indice primario para obtener los registros completos
+    '''
+    def _spatial_in_condition(self, table: Table, condition: SpatialInCond) -> List:
+        column_name = condition.column
+        point = condition.point
+        radius = condition.radius
+
+        index = table.indexes.get(column_name)
+        if index is None:
+            return []
+
+        try:
+            pk_references = index.rangeSearch((point.x, point.y), radius)
+            primary_index = table.get_primary_index()
+
+            full_records = []
+            for pk_ref in pk_references:
+                pk_value = pk_ref[table.key_column]
+                records = primary_index.search(pk_value)
+                full_records.extend(records)
+
+            return full_records
+
+        except Exception:
+            return []
+
+    '''
+    Esta busqueda nuevamente es solo para los RTree, donde se le brinda un punto y un k, que es la cantidad de registros 
+    más cercanos a ese punto que se desean obtener
+    Nuevamente se obtienen las referencias y se busca en el indice primario para obtener los registros completos
+    '''
+    def _spatial_knn_condition(self, table: Table, condition: SpatialKNNCond) -> List:
+        column_name = condition.column
+        point = condition.point
+        k = condition.k
+
+        index = table.indexes.get(column_name)
+        if index is None:
+            return []
+
+        try:
+            pk_references = index.knnSearch((point.x, point.y), k)
+            primary_index = table.get_primary_index()
+
+            full_records = []
+            for pk_ref in pk_references:
+                pk_value = pk_ref[table.key_column]
+                records = primary_index.search(pk_value)
+                full_records.extend(records)
+
+            return full_records
+
+        except Exception:
+            return []
+
+    '''
+    Esta funcion se encarga de manejar las condiciones logicas AND y OR, de tal forma que podamos encadenar multiples
+    condiciones en una sola consulta
+    '''
+    def _logic_condition(self, table: Table, condition: LogicCond) -> List:
+        left_results = self._execute_condition(table, condition.left)
+        right_results = self._execute_condition(table, condition.right)
+
+        if condition.operator.value == "AND":
+            intersection_results = []
+            for record in left_results:
+                if record in right_results:
+                    intersection_results.append(record)
+            return intersection_results
+
+        elif condition.operator.value == "OR":
+            union_results = left_results.copy()
+            for record in right_results:
+                if record not in union_results:
+                    union_results.append(record)
+            return union_results
+
+        return []
