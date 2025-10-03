@@ -87,7 +87,10 @@ class SQLParser:
         self._consume(TokenType.INDEX, "Se esperaba 'INDEX'")
         
         index_type = self._parse_index_type()
-        
+        if index_type not in [IndexType.SEQ, IndexType.ISAM, IndexType.BTREE]:
+            raise ParseError(f"Index type {index_type.value} cannot be used as primary key index. "
+                            f"Only SEQ, ISAM, and BTREE are allowed for primary key columns.")
+
         self._consume(TokenType.LPAREN, "Se esperaba '('")
 
         if self._check(TokenType.ID):
@@ -111,6 +114,14 @@ class SQLParser:
         index_type = None
         if self._match(TokenType.INDEX):
             index_type = self._parse_index_type()
+            if is_key:
+                if index_type not in [IndexType.SEQ, IndexType.ISAM, IndexType.BTREE]:
+                    raise ParseError(f"Index type {index_type.value} cannot be used as primary key index. "
+                                f"Only SEQ, ISAM, and BTREE are allowed for primary key columns.")
+            else:
+                if index_type not in [IndexType.HASH, IndexType.RTREE, IndexType.BTREE]:
+                    raise ParseError(f"Index type {index_type.value} cannot be used as secondary index. "
+                                f"Only HASH, RTREE, and BTREE are allowed for secondary indexes.")
 
         if data_type == DataType.ARRAY:
             array_dimensions = size
