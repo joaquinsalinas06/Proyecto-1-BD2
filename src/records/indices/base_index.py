@@ -4,16 +4,19 @@ from ...parser.ast import IndexType
 
 
 class BaseIndex(ABC):
-    def __init__(self, column_name: str, filename: str = None):
+    def __init__(self, column_name: str, filename: str = None, is_primary: bool = False, primary_key_column: str = None):
         self.column_name = column_name
         self.filename = filename or f"{column_name}_index.dat"
+        self.is_primary = is_primary
+        self.primary_key_column = primary_key_column
 
     @abstractmethod
     def search(self, key: Any) -> List[Dict[str, Any]]:
         pass
 
     @abstractmethod
-    def rangeSearch(self, begin_key: Any, end_key: Any) -> List[Dict[str, Any]]:
+    def rangeSearch(self, begin_key: Any, end_key: Any,
+                   begin_inclusive: bool = True, end_inclusive: bool = True) -> List[Dict[str, Any]]:
         pass
 
     @abstractmethod
@@ -22,6 +25,14 @@ class BaseIndex(ABC):
 
     @abstractmethod
     def remove(self, key: Any) -> bool:
+        pass
+
+    @abstractmethod
+    def getAllRecords(self) -> List[Dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    def clear_all(self) -> int:
         pass
 
 
@@ -35,26 +46,35 @@ class SpatialIndex(BaseIndex):
         pass
 
 
-def create_index(index_type: IndexType, column_name: str, filename: str = None) -> BaseIndex:
+def create_index(index_type: IndexType, column_name: str, filename: str = None,
+                is_primary: bool = False, primary_key_column: str = None, table_schema=None) -> BaseIndex:
+    from .rtree_index import RTreeIndex
+    from .extendible_hash import ExtendibleHashIndex
+    from .btree_index import BTreeIndex
+    from .sequential_file import SequentialFileIndex
+    from .isam_index import ISAMIndex
+
     if index_type == IndexType.SEQ:
-        from .sequential_file import SequentialFileIndex
-        return SequentialFileIndex(column_name, filename)
+        return SequentialFileIndex(column_name, table_schema, filename, is_primary, primary_key_column)
 
     elif index_type == IndexType.ISAM:
-        from .isam_index import ISAMIndex
-        return ISAMIndex(column_name, filename)
+        return ISAMIndex(column_name, filename, is_primary, primary_key_column)
 
     elif index_type == IndexType.BTREE:
-        from .btree_index import BTreeIndex
-        return BTreeIndex(column_name, filename)
+        return BTreeIndex(column_name, filename, is_primary, primary_key_column)
 
     elif index_type == IndexType.HASH:
-        from .extendible_hash import ExtendibleHashIndex
-        return ExtendibleHashIndex(column_name, filename)
+        return ExtendibleHashIndex(column_name, filename, is_primary, primary_key_column)
 
     elif index_type == IndexType.RTREE:
-        from .rtree_index import RTreeIndex
-        return RTreeIndex(column_name, filename)
+        #Esto es por si no definieron dimensiones en el schema, por defecto 2
+        dimensiones = 2
+        if table_schema:
+            for col in table_schema:
+                if col.name == column_name and col.array_dimensions:
+                    dimensiones = col.array_dimensions
+                    break
+        return RTreeIndex(column_name, filename, is_primary, primary_key_column, dimensions=dimensiones)
 
     else:
         raise ValueError(f"Tipo de índice no soportado: {index_type}")
