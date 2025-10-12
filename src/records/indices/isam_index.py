@@ -1,13 +1,97 @@
-from typing import List, Dict, Any
-
+from typing import List, Dict, Any, Optional, Union
 import os
 import struct
-from typing import List, Dict, Any, Optional
 from .base_index import BaseIndex
 from ..record import DynamicRecord
 from ...parser.ast import ColumnDef
 
-#preguntar sobre table schema
+BLOCK_FACTOR = 4
+
+class Page:
+    HEADER_FORMAT = 'ii'  # size, next_page
+    HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+    SIZE_OF_PAGE = HEADER_SIZE + BLOCK_FACTOR * DynamicRecord.SIZE_OF_DynamicRecord
+
+    def __init__(self, records=None, next_page=-1):
+        self.records = records or []
+        self.next_page = next_page
+
+    def pack(self):
+        header_data = struct.pack(self.HEADER_FORMAT, len(self.records), self.next_page)
+        record_data = b''
+        for record in self.records:
+            record_data += record.pack()
+        
+        # Rellenar con registros vacíos si es necesario
+        i = len(self.records)
+        while i < BLOCK_FACTOR:
+            record_data += b'\x00' * DynamicRecord.SIZE_OF_RECORD
+            i += 1
+        return header_data + record_data
+
+    @staticmethod
+    def unpack(data: bytes):
+        size, next_page = struct.unpack(Page.HEADER_FORMAT, data[:Page.HEADER_SIZE])
+        offset = Page.HEADER_SIZE
+        records = []
+        for i in range(size):
+            record_data = data[offset: offset + DynamicRecord.SIZE_OF_RECORD]
+            records.append(DynamicRecord.unpack(record_data))
+            offset += DynamicRecord.SIZE_OF_RECORD
+        return Page(records, next_page)
+
+class Node:
+    """Clase base para nodos del árbol ISAM"""
+    def __init__(self, is_leaf=False):
+        self.is_leaf = is_leaf
+
+class ISAMIntermediateNode(Node):
+    """Nodo intermedio del árbol ISAM con punteros a hijos"""
+    # Formato: 3 valores (claves) y 4 punteros (3 hijos + 1 puntero extra)
+    FORMAT = 'iii' + 'i' * 4  # 3 valores + 4 punteros
+    SIZE = struct.calcsize(FORMAT)
+    
+    def __init__(self, values=None, pointers=None):
+        super().__init__(is_leaf=False)
+        self.values = values or [0, 0, 0]  # 3 valores/claves
+        self.pointers = pointers or [-1, -1, -1, -1]  # 4 punteros a hijos
+        
+    def pack(self):
+        values_data = struct.pack('iii', *self.values)
+        pointers_data = struct.pack('iiii', *self.pointers)
+        return values_data + pointers_data
+    
+    @staticmethod
+    def unpack(data: bytes):
+        if len(data) < ISAMIntermediateNode.SIZE:
+            return ISAMIntermediateNode()
+        
+        values = struct.unpack('iii', data[:12])
+        pointers = struct.unpack('iiii', data[12:28])
+        return ISAMIntermediateNode(list(values), list(pointers))
+
+class ISAMLeafNode(Node):
+    """Nodo hoja del árbol ISAM con puntero a página de datos"""
+    # Formato: valor de llave + puntero a página + puntero siguiente
+    FORMAT = 'iii'  # key_value, data_page_pointer, next_pointer
+    SIZE = struct.calcsize(FORMAT)
+    
+    def __init__(self, key_value=0, data_page_pointer=-1, next_pointer=-1):
+        super().__init__(is_leaf=True)
+        self.key_value = key_value
+        self.data_page_pointer = data_page_pointer
+        self.next_pointer = next_pointer
+        
+    def pack(self):
+        return struct.pack(self.FORMAT, self.key_value, self.data_page_pointer, self.next_pointer)
+    
+    @staticmethod
+    def unpack(data: bytes):
+        if len(data) < ISAMLeafNode.SIZE:
+            return ISAMLeafNode()
+        key_value, data_page_pointer, next_pointer = struct.unpack(ISAMLeafNode.FORMAT, data)
+        return ISAMLeafNode(key_value, data_page_pointer, next_pointer)
+
 class ISAMIndex(BaseIndex):
     def __init__(self, column_name: str, table_schema: List[ColumnDef], filename: str = None, block_factor: int = 4):
         super().__init__(column_name, filename)
@@ -19,173 +103,223 @@ class ISAMIndex(BaseIndex):
         
         # Archivos
         self.data_file = filename or f"{column_name}_isam.dat"
-        self.index_file = filename.replace('.dat', '_index.dat') if isinstance(filename, str) else f"{column_name}_index.dat"
-        self.overflow_file = filename.replace('.dat', '_overflow.dat') if isinstance(filename, str) else f"{column_name}_overflow.dat"
+        self.index_file = filename.replace('.dat', '_index.dat') if filename else f"{column_name}_index.dat"
+        self.overflow_file = filename.replace('.dat', '_overflow.dat') if filename else f"{column_name}_overflow.dat"
+        self.tree_file = filename.replace('.dat', '_tree.dat') if filename else f"{column_name}_tree.dat"
         
         self._ensure_files_exist()
         
-        # Estructura de índice en memoria
-        self.primary_index = self._load_index()
+        # Estructuras en memoria
+        self.root_node = None
+        self._load_tree_structure()
     
     def _ensure_files_exist(self):
-        for file_path in [self.data_file, self.index_file, self.overflow_file]:
+        for file_path in [self.data_file, self.index_file, self.overflow_file, self.tree_file]:
             if not os.path.exists(file_path):
                 with open(file_path, 'wb') as f:
                     pass
     
-    def _load_index(self) -> List[Dict[str, Any]]:
-        """Carga el índice primario en memoria"""
-        index = []
-        if not os.path.exists(self.index_file):
-            return index
-        
-        with open(self.index_file, 'r') as f:
-            for line in f:
-                parts = line.strip().split(',')
-                if len(parts) == 2:
-                    key, pos = parts
-                    index.append({"key": key, "pos": int(pos)})
-        return index
+    def _load_tree_structure(self):
+        """Carga la estructura del árbol desde archivo"""
+        try:
+            with open(self.tree_file, 'rb') as f:
+                # Leer tipo de nodo raíz
+                node_type = f.read(1)
+                if node_type == b'I':  # Nodo intermedio
+                    data = f.read(ISAMIntermediateNode.SIZE)
+                    self.root_node = ISAMIntermediateNode.unpack(data)
+                elif node_type == b'L':  # Nodo hoja
+                    data = f.read(ISAMLeafNode.SIZE)
+                    self.root_node = ISAMLeafNode.unpack(data)
+        except:
+            self.root_node = None
     
-    def _save_index(self):
-        with open(self.index_file, 'w') as f:
-            for entry in self.primary_index:
-                f.write(f"{entry['key']},{entry['pos']}\n")
+    def _save_tree_structure(self):
+        """Guarda la estructura del árbol en archivo"""
+        with open(self.tree_file, 'wb') as f:
+            if isinstance(self.root_node, ISAMIntermediateNode):
+                f.write(b'I')
+                f.write(self.root_node.pack())
+            elif isinstance(self.root_node, ISAMLeafNode):
+                f.write(b'L')
+                f.write(self.root_node.pack())
     
-    # --------------------------- Utilidades --------------------------- #
-    
-    def _read_block(self, position: int) -> List[Dict[str, Any]]:
-        """Lee un bloque de registros desde una posición en el archivo principal"""
-        records = []
+    def _read_page(self, position: int) -> Page:
+        """Lee una página desde una posición específica"""
         with open(self.data_file, 'rb') as f:
             f.seek(position)
-            for _ in range(self.block_factor):
-                data = f.read(self.record_size)
-                if len(data) < self.record_size:
-                    break
-                record = DynamicRecord.unpack(self.table_schema, data)
-                records.append(record.to_dict())
-        return records
+            data = f.read(Page.SIZE_OF_PAGE)
+            return Page.unpack(data)
     
-    def _write_block(self, records: List[Dict[str, Any]]) -> int:
-        """Escribe un bloque y devuelve el offset inicial"""
+    def _write_page(self, page: Page) -> int:
+        """Escribe una página y devuelve su posición"""
         with open(self.data_file, 'ab') as f:
-            pos = f.tell()
-            for record_data in records:
-                record = DynamicRecord(self.table_schema, **record_data)
-                f.write(record.pack())
-        return pos
+            position = f.tell()
+            f.write(page.pack())
+        return position
     
-    # --------------------------- Construcción inicial --------------------------- #
+    def _find_leaf_node(self, key: Any) -> Optional[ISAMLeafNode]:
+        """Encuentra el nodo hoja correspondiente a una clave"""
+        if not self.root_node:
+            return None
+        
+        current = self.root_node
+        
+        # Navegar hasta el nodo hoja
+        while not current.is_leaf:
+            if isinstance(current, ISAMIntermediateNode):
+                # Encontrar el puntero correcto basado en los valores
+                if key < current.values[0]:
+                    next_pointer = current.pointers[0]
+                elif key < current.values[1]:
+                    next_pointer = current.pointers[1]
+                elif key < current.values[2]:
+                    next_pointer = current.pointers[2]
+                else:
+                    next_pointer = current.pointers[3]
+                
+                if next_pointer == -1:
+                    return None
+                
+                # Cargar el siguiente nodo (en implementación real leería del archivo)
+                current = self._load_node_from_disk(next_pointer)
+            else:
+                break
+        
+        return current if current.is_leaf else None
+    
+    def _load_node_from_disk(self, pointer: int) -> Optional[Node]:
+        """Carga un nodo desde disco basado en el puntero"""
+        # Implementación simplificada - en realidad leería desde el archivo de árbol
+        return None
     
     def build(self, records: List[Dict[str, Any]]):
-        """Construye el archivo ISAM ordenado y su índice primario"""
+        """Construye el índice ISAM completo"""
         if not records:
             return
         
+        # Ordenar registros por clave
         records.sort(key=lambda r: r[self.column_name])
         
-        blocks = [records[i:i+self.block_factor] for i in range(0, len(records), self.block_factor)]
+        # Crear páginas de datos
+        pages = []
+        for i in range(0, len(records), self.block_factor):
+            page_records = records[i:i + self.block_factor]
+            page = Page(page_records)
+            pages.append(page)
         
-        self.primary_index.clear()
-        with open(self.data_file, 'wb') as f:
+        # Escribir páginas y crear nodos hoja
+        leaf_nodes = []
+        for i, page in enumerate(pages):
+            position = self._write_page(page)
+            key = page.records[0].get(self.column_name) if page.records else 0
+            
+            leaf_node = ISAMLeafNode(
+                key_value=key,
+                data_page_pointer=position,
+                next_pointer=-1 if i == len(pages) - 1 else i + 1
+            )
+            leaf_nodes.append(leaf_node)
+        
+        # Construir árbol (simplificado - solo un nivel por ahora)
+        if len(leaf_nodes) <= 4:
+            # Caso simple: pocos nodos hoja, usar solo nodo intermedio
+            self.root_node = ISAMIntermediateNode()
+            for i, leaf in enumerate(leaf_nodes):
+                if i < 3:
+                    self.root_node.values[i] = leaf.key_value
+                self.root_node.pointers[i] = i  # puntero al nodo hoja
+        else:
+            # Caso complejo: construir árbol multi-nivel (implementar recursivamente)
             pass
         
-        for block in blocks:
-            pos = self._write_block(block)
-            key = block[0][self.column_name]
-            self.primary_index.append({"key": key, "pos": pos})
-        
-        self._save_index()
-    
-    # --------------------------- Búsqueda --------------------------- #
+        self._save_tree_structure()
     
     def search(self, key: Any) -> List[Dict[str, Any]]:
-        """Busca registros usando el índice primario"""
-        if not self.primary_index:
+        """Busca registros por clave usando el árbol ISAM"""
+        leaf_node = self._find_leaf_node(key)
+        if not leaf_node:
             return []
         
-        # Buscar el bloque adecuado
-        target_block = None
-        for i, entry in enumerate(self.primary_index):
-            if key < entry['key']:
-                if i == 0:
-                    target_block = self.primary_index[0]
-                else:
-                    target_block = self.primary_index[i-1]
-                break
-        if target_block is None:
-            target_block = self.primary_index[-1]
+        # Leer la página de datos
+        page = self._read_page(leaf_node.data_page_pointer)
         
-        # Leer el bloque
-        block_records = self._read_block(target_block['pos'])
-        
-        # Filtrar por clave
-        result = [r for r in block_records if r[self.column_name] == key]
-        return result
-    
-    def rangeSearch(self, begin_key: Any, end_key: Any) -> List[Dict[str, Any]]:
+        # Filtrar registros por clave
         results = []
-        for entry in self.primary_index:
-            block = self._read_block(entry['pos'])
-            for r in block:
-                key_val = r[self.column_name]
-                if begin_key <= key_val <= end_key:
-                    results.append(r)
+        for record in page.records:
+            if record.get(self.column_name) == key:
+                results.append(record.to_dict())
+        
         return results
     
-    # --------------------------- Inserción --------------------------- #
+    def rangeSearch(self, begin_key: Any, end_key: Any) -> List[Dict[str, Any]]:
+        """Búsqueda por rango de claves"""
+        results = []
+        current_leaf = self._find_leaf_node(begin_key)
+        
+        while current_leaf:
+            page = self._read_page(current_leaf.data_page_pointer)
+            
+            for record in page.records:
+                key_val = record.get(self.column_name)
+                if begin_key <= key_val <= end_key:
+                    results.append(record.to_dict())
+                elif key_val > end_key:
+                    return results
+            
+            # Mover al siguiente nodo hoja
+            if current_leaf.next_pointer != -1:
+                current_leaf = self._load_node_from_disk(current_leaf.next_pointer)
+            else:
+                break
+        
+        return results
     
     def add(self, record: Dict[str, Any]) -> bool:
+        """Añade un nuevo registro"""
         key = record[self.column_name]
-        if not self.primary_index:
-            pos = self._write_block([record])
-            self.primary_index.append({"key": key, "pos": pos})
-            self._save_index()
-            return True
+        leaf_node = self._find_leaf_node(key)
         
-        # Buscar bloque donde debería ir
-        target_block = None
-        for i, entry in enumerate(self.primary_index):
-            if key < entry['key']:
-                target_block = self.primary_index[i-1] if i > 0 else self.primary_index[0]
-                break
-        if target_block is None:
-            target_block = self.primary_index[-1]
+        if not leaf_node:
+            return False
         
-        # Leer bloque y ver si hay espacio
-        block_records = self._read_block(target_block['pos'])
-        if len(block_records) < self.block_factor:
-            block_records.append(record)
-            block_records.sort(key=lambda r: r[self.column_name])
+        # Leer página actual
+        page = self._read_page(leaf_node.data_page_pointer)
+        
+        if len(page.records) < self.block_factor:
+            # Hay espacio en la página
+            page.records.append(DynamicRecord(self.table_schema, **record))
+            page.records.sort(key=lambda r: r.get(self.column_name))
             
-            # Reescribir bloque
+            # Reescribir página
             with open(self.data_file, 'r+b') as f:
-                f.seek(target_block['pos'])
-                for r in block_records:
-                    rec = DynamicRecord(self.table_schema, **r)
-                    f.write(rec.pack())
+                f.seek(leaf_node.data_page_pointer)
+                f.write(page.pack())
             return True
         else:
-            # Escribir en overflow
+            # Página llena - escribir en overflow
             with open(self.overflow_file, 'ab') as f:
                 rec = DynamicRecord(self.table_schema, **record)
                 f.write(rec.pack())
             return True
     
-    # --------------------------- Eliminación --------------------------- #
-    
     def remove(self, key: Any) -> bool:
-        """Elimina registro si existe (solo en bloque principal, no en overflow para simplificar)"""
-        for entry in self.primary_index:
-            block_records = self._read_block(entry['pos'])
-            filtered = [r for r in block_records if r[self.column_name] != key]
-            if len(filtered) != len(block_records):
-                # Reescribir bloque sin ese registro
-                with open(self.data_file, 'r+b') as f:
-                    f.seek(entry['pos'])
-                    for r in filtered:
-                        rec = DynamicRecord(self.table_schema, **r)
-                        f.write(rec.pack())
-                return True
+        """Elimina registros por clave"""
+        leaf_node = self._find_leaf_node(key)
+        if not leaf_node:
+            return False
+        
+        page = self._read_page(leaf_node.data_page_pointer)
+        original_count = len(page.records)
+        
+        # Filtrar registros
+        page.records = [r for r in page.records if r.get(self.column_name) != key]
+        
+        if len(page.records) < original_count:
+            # Reescribir página
+            with open(self.data_file, 'r+b') as f:
+                f.seek(leaf_node.data_page_pointer)
+                f.write(page.pack())
+            return True
+        
         return False

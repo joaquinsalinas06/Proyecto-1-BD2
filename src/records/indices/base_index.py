@@ -53,11 +53,12 @@ def create_index(index_type: IndexType, column_name: str, filename: str = None,
     from .btree_index import BTreeIndex
     from .sequential_file import SequentialFileIndex
     from .isam_index import ISAMIndex
+    print("column_name:", column_name, "filename:", filename, "is_primary:", is_primary, "primary_key_column:", primary_key_column)
 
     if index_type == IndexType.SEQ:
         return SequentialFileIndex(column_name, table_schema, filename, is_primary, primary_key_column)
 
-    elif index_type == IndexType.ISAM:
+    if index_type == IndexType.ISAM:
         return ISAMIndex(column_name, filename, is_primary, primary_key_column)
 
     elif index_type == IndexType.BTREE:
