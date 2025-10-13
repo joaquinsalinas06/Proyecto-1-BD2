@@ -12,12 +12,16 @@ class Page:
     """Página de datos optimizada con encadenamiento"""
     HEADER_FORMAT = 'iiq'  # size, next_page, overflow_pointer
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-    SIZE_OF_PAGE = HEADER_SIZE + BLOCK_FACTOR * DynamicRecord.SIZE_OF_RECORD
-
-    def __init__(self, records=None, next_page=-1, overflow_pointer=-1):
+    
+    def __init__(self, records=None, next_page=-1, overflow_pointer=-1, record_size=None):
         self.records = records or []
         self.next_page = next_page
-        self.overflow_pointer = overflow_pointer  # Puntero a página de overflow
+        self.overflow_pointer = overflow_pointer
+        self.record_size = record_size or (DynamicRecord.SIZE_OF_RECORD if hasattr(DynamicRecord, 'SIZE_OF_RECORD') else 0)
+    
+    @property
+    def SIZE_OF_PAGE(self):
+        return self.HEADER_SIZE + BLOCK_FACTOR * self.record_size
 
     def pack(self):
         header_data = struct.pack(self.HEADER_FORMAT, len(self.records), 
@@ -28,23 +32,28 @@ class Page:
         
         # Rellenar con registros vacíos
         for i in range(len(self.records), BLOCK_FACTOR):
-            record_data += b'\x00' * DynamicRecord.SIZE_OF_RECORD
+            record_data += b'\x00' * self.record_size
         
         return header_data + record_data
 
     @staticmethod
-    def unpack(data: bytes):
+    def unpack(data: bytes, table_schema: List[ColumnDef], record_size: int):
+        """Desempaqueta una página con el schema de la tabla"""
         size, next_page, overflow_pointer = struct.unpack(
             Page.HEADER_FORMAT, data[:Page.HEADER_SIZE]
         )
         offset = Page.HEADER_SIZE
         records = []
         for i in range(size):
-            record_data = data[offset: offset + DynamicRecord.SIZE_OF_RECORD]
-            if record_data != b'\x00' * DynamicRecord.SIZE_OF_RECORD:
-                records.append(DynamicRecord.unpack(record_data))
-            offset += DynamicRecord.SIZE_OF_RECORD
-        return Page(records, next_page, overflow_pointer)
+            record_data = data[offset: offset + record_size]
+            if record_data != b'\x00' * record_size:
+                records.append(DynamicRecord.unpack(table_schema, record_data))
+            offset += record_size
+        return Page(records, next_page, overflow_pointer, record_size)
+    
+    def get_key(self, record: DynamicRecord, column_name: str) -> Any:
+        """Extrae la clave de indexación de un record"""
+        return getattr(record, column_name, None)
 
 class ISAMIntermediateNode:
     """Nodo intermedio optimizado con serialización eficiente"""
@@ -143,17 +152,18 @@ class ISAMIndex(BaseIndex):
         super().__init__(column_name, filename)
         self.table_schema = table_schema
         self.block_factor = block_factor
+        self.column_name = column_name
         
-        # Calcular tamaño de registro
-        temp_record = DynamicRecord._build_format(table_schema)
-        self.record_size = struct.calcsize(temp_record)
+        # Calcular tamaño de registro dinámicamente
+        self.record_format = DynamicRecord._build_format(table_schema)
+        self.record_size = struct.calcsize(self.record_format)
         
         # Archivos del sistema ISAM
         base_name = filename.replace('.dat', '') if filename else column_name
-        self.data_file = f"{base_name}_data.dat"      # Páginas de datos
-        self.tree_file = f"{base_name}_tree.dat"      # Nodos del árbol
-        self.overflow_file = f"{base_name}_overflow.dat"  # Overflow
-        self.metadata_file = f"{base_name}_meta.dat"  # Metadatos
+        self.data_file = f"{base_name}_data.dat"
+        self.tree_file = f"{base_name}_tree.dat"
+        self.overflow_file = f"{base_name}_overflow.dat"
+        self.metadata_file = f"{base_name}_meta.dat"
         
         # Metadatos en memoria
         self.metadata = ISAMMetadata()
@@ -164,6 +174,22 @@ class ISAMIndex(BaseIndex):
         
         # Inicializar estructura
         self._initialize()
+    
+    def _get_record_key(self, record: DynamicRecord) -> Any:
+        """Extrae la clave primaria de un DynamicRecord"""
+        return getattr(record, self.column_name, None)
+    
+    def _dict_to_record(self, data: Dict[str, Any]) -> DynamicRecord:
+        """Convierte un diccionario a DynamicRecord"""
+        return DynamicRecord(self.table_schema, **data)
+    
+    def _record_to_dict(self, record: DynamicRecord) -> Dict[str, Any]:
+        """Convierte un DynamicRecord a diccionario"""
+        result = {}
+        for col in self.table_schema:
+            result[col.name] = getattr(record, col.name, None)
+        result['deleted'] = record.deleted
+        return result
     
     def _initialize(self):
         """Inicializa o carga la estructura ISAM desde disco"""
@@ -241,17 +267,19 @@ class ISAMIndex(BaseIndex):
     
     def _write_page(self, page: Page, position: int = -1) -> int:
         """Escribe una página en disco (nueva o actualización)"""
+        packed_data = page.pack()
+        
         if position == -1:
             # Nueva página al final
             with open(self.data_file, 'ab') as f:
                 position = f.tell()
-                f.write(page.pack())
+                f.write(packed_data)
             self.metadata.num_pages += 1
         else:
             # Actualizar página existente
             with open(self.data_file, 'r+b') as f:
                 f.seek(position)
-                f.write(page.pack())
+                f.write(packed_data)
         
         return position
     
@@ -261,12 +289,13 @@ class ISAMIndex(BaseIndex):
             return None
         
         try:
+            page_size = Page.HEADER_SIZE + BLOCK_FACTOR * self.record_size
             with open(self.data_file, 'rb') as f:
                 f.seek(position)
-                data = f.read(Page.SIZE_OF_PAGE)
-                if len(data) < Page.SIZE_OF_PAGE:
+                data = f.read(page_size)
+                if len(data) < page_size:
                     return None
-                return Page.unpack(data)
+                return Page.unpack(data, self.table_schema, self.record_size)
         except Exception as e:
             print(f"Error reading page at {position}: {e}")
             return None
@@ -278,28 +307,23 @@ class ISAMIndex(BaseIndex):
         
         print(f"Building ISAM index for {len(records)} records...")
         
-        # Ordenar registros por clave
-        sorted_records = sorted(records, key=lambda r: r[self.column_name])
+        # Convertir diccionarios a DynamicRecords y ordenar por clave
+        dynamic_records = [self._dict_to_record(rec) for rec in records]
+        dynamic_records.sort(key=lambda r: self._get_record_key(r))
         
         # Crear páginas de datos
         leaf_nodes = []
         prev_page_pos = -1
         
-        for i in range(0, len(sorted_records), self.block_factor):
-            page_records = sorted_records[i:i + self.block_factor]
+        for i in range(0, len(dynamic_records), self.block_factor):
+            page_records = dynamic_records[i:i + self.block_factor]
             
-            # Convertir a DynamicRecord
-            dynamic_records = [
-                DynamicRecord(self.table_schema, **rec) 
-                for rec in page_records
-            ]
-            
-            # Crear página
-            page = Page(records=dynamic_records)
+            # Crear página con tamaño correcto
+            page = Page(records=page_records, record_size=self.record_size)
             page_pos = self._write_page(page)
             
-            # Crear nodo hoja
-            key = page_records[0][self.column_name]
+            # Crear nodo hoja con la clave del primer registro
+            key = self._get_record_key(page_records[0])
             leaf_node = ISAMLeafNode(
                 key_value=key,
                 data_page_pointer=page_pos,
@@ -319,7 +343,7 @@ class ISAMIndex(BaseIndex):
         self._build_tree_from_leaves(leaf_nodes)
         
         # Actualizar metadatos
-        self.metadata.num_records = len(sorted_records)
+        self.metadata.num_records = len(dynamic_records)
         self.metadata.is_built = True
         self._save_metadata()
         
@@ -401,7 +425,7 @@ class ISAMIndex(BaseIndex):
         first_idx = -1
         while left <= right:
             mid = (left + right) // 2
-            mid_key = records_list[mid].get(self.column_name)
+            mid_key = self._get_record_key(records_list[mid])
             
             if mid_key == key:
                 first_idx = mid
@@ -415,22 +439,22 @@ class ISAMIndex(BaseIndex):
         if first_idx != -1:
             # Hacia la derecha
             idx = first_idx
-            while idx < len(records_list) and records_list[idx].get(self.column_name) == key:
-                results.append(records_list[idx].to_dict())
+            while idx < len(records_list) and self._get_record_key(records_list[idx]) == key:
+                results.append(self._record_to_dict(records_list[idx]))
                 idx += 1
             
             # Hacia la izquierda (si hay duplicados antes)
             idx = first_idx - 1
-            while idx >= 0 and records_list[idx].get(self.column_name) == key:
-                results.append(records_list[idx].to_dict())
+            while idx >= 0 and self._get_record_key(records_list[idx]) == key:
+                results.append(self._record_to_dict(records_list[idx]))
                 idx -= 1
         
         # Buscar en overflow si existe
         if page.overflow_pointer != -1:
             overflow_records = self._read_overflow(page.overflow_pointer)
             for record in overflow_records:
-                if record.get(self.column_name) == key:
-                    results.append(record.to_dict())
+                if self._get_record_key(record) == key:
+                    results.append(self._record_to_dict(record))
         
         return results
     
@@ -456,13 +480,13 @@ class ISAMIndex(BaseIndex):
         return None
     
     def rangeSearch(self, begin_key: Any, end_key: Any) -> List[Dict[str, Any]]:
-        """Búsqueda por rango optimizada"""
+        """Búsqueda por rango optimizada con búsqueda binaria"""
         if not self.metadata.is_built:
             return []
         
         results = []
         
-        # Encontrar primer nodo hoja
+        # Encontrar primer nodo hoja que podría contener begin_key
         current_leaf = self._find_leaf_for_key(begin_key)
         
         while current_leaf:
@@ -471,21 +495,40 @@ class ISAMIndex(BaseIndex):
             if not page:
                 break
             
-            # Procesar registros
-            for record in page.records:
-                key_val = record.get(self.column_name)
-                if begin_key <= key_val <= end_key:
-                    results.append(record.to_dict())
-                elif key_val > end_key:
-                    return results
+            records_list = page.records
             
-            # Procesar overflow
+            # BÚSQUEDA BINARIA para encontrar inicio del rango en esta página
+            left, right = 0, len(records_list) - 1
+            start_idx = len(records_list)  # Por defecto, después del final
+            
+            # Encontrar el primer registro >= begin_key
+            while left <= right:
+                mid = (left + right) // 2
+                mid_key = self._get_record_key(records_list[mid])
+                
+                if mid_key >= begin_key:
+                    start_idx = mid
+                    right = mid - 1
+                else:
+                    left = mid + 1
+            
+            # Procesar registros desde start_idx en adelante
+            for idx in range(start_idx, len(records_list)):
+                key_val = self._get_record_key(records_list[idx])
+                
+                if key_val > end_key:
+                    return results  # Ya pasamos el rango
+                
+                if key_val >= begin_key:
+                    results.append(self._record_to_dict(records_list[idx]))
+            
+            # Procesar overflow con búsqueda lineal (no está ordenado)
             if page.overflow_pointer != -1:
                 overflow_records = self._read_overflow(page.overflow_pointer)
                 for record in overflow_records:
-                    key_val = record.get(self.column_name)
+                    key_val = self._get_record_key(record)
                     if begin_key <= key_val <= end_key:
-                        results.append(record.to_dict())
+                        results.append(self._record_to_dict(record))
             
             # Siguiente nodo hoja
             if current_leaf.next_pointer != -1:
@@ -514,12 +557,12 @@ class ISAMIndex(BaseIndex):
             return False
         
         # Crear DynamicRecord
-        dynamic_record = DynamicRecord(self.table_schema, **record)
+        dynamic_record = self._dict_to_record(record)
         
         if len(page.records) < self.block_factor:
             # Hay espacio en la página
             page.records.append(dynamic_record)
-            page.records.sort(key=lambda r: r.get(self.column_name))
+            page.records.sort(key=lambda r: self._get_record_key(r))
             self._write_page(page, leaf_node.data_page_pointer)
             self.metadata.num_records += 1
             self._save_metadata()
@@ -550,11 +593,12 @@ class ISAMIndex(BaseIndex):
             with open(self.overflow_file, 'rb') as f:
                 f.seek(position)
                 while True:
-                    data = f.read(DynamicRecord.SIZE_OF_RECORD)
-                    if len(data) < DynamicRecord.SIZE_OF_RECORD:
+                    data = f.read(self.record_size)
+                    if len(data) < self.record_size:
                         break
-                    record = DynamicRecord.unpack(data)
-                    records.append(record)
+                    if data != b'\x00' * self.record_size:
+                        record = DynamicRecord.unpack(self.table_schema, data)
+                        records.append(record)
         except:
             pass
         return records
