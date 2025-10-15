@@ -344,11 +344,6 @@ class BTreeIndex(BaseIndex):
         node.children[i + 1] = right_tree
         node.refs[i] = ref
         node.count += 1
-    
-    def _encode_key(self, val) -> int:
-        if isinstance(val, int):
-            return val
-        return hash64(val) 
         
     def _get_page_by_id(self, pid: int) -> Page:
         ps = self.page_size
@@ -381,29 +376,21 @@ class BTreeIndex(BaseIndex):
         return self.key_codec.from_bin(self.key_codec.to_bin(v))
 
     def _display_tree(self, pid: int, indent: str, last: bool) -> None:
-        """Versión adaptada: carga Page por id y pinta claves y tipo (Leaf/Internal)."""
         page = self._get_page_by_id(pid)
-        # Construye la línea de este nodo
         branch = "└" if last else "├"
         keys_str = ",".join(str(k) for k in page.keys[:page.count])
         tag = " L" if page.is_leaf else ""
         print(f"{indent}{branch}[{keys_str}]{tag} (pid={pid})")
 
-        # Si es interno, recorre hijos de izquierda a derecha
         if not page.is_leaf:
-            # prefijo para hijos: si este fue 'last', ponemos espacios; si no, una barra vertical
             child_indent = indent + ("  " if last else "│ ")
-            # hijos válidos: page.children[0..count] (pueden haber -1 si aún no poblaste)
             child_ids = page.children[:page.count + 1]
-            # Dibuja cada hijo
             for i, cid in enumerate(child_ids):
                 if cid == -1:
                     continue
                 self._display_tree(cid, child_indent, last=(i == len(child_ids) - 1))
 
-
     def display_levels(self) -> None:
-        """Imprime el árbol por niveles (BFS). Útil para ver estructura tras splits."""
         if self._page_count() == 0:
             print("(árbol vacío)")
             return
