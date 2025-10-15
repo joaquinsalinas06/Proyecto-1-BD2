@@ -7,16 +7,23 @@ from ...parser.ast import ColumnDef
 
 
 class SequentialFileIndex(BaseIndex):
-    def __init__(self, column_name: str, table_schema: List[ColumnDef], filename: str = None, max_auxiliary_records: int = 5):
-        super().__init__(column_name, filename)
+    def __init__(self, column_name: str, table_schema: List[ColumnDef], filename: str = None, is_primary: bool = False, primary_key_column: str = None, max_auxiliary_records: int = 5):
+        super().__init__(column_name, filename, is_primary, primary_key_column)
         self.table_schema = table_schema
         self.max_auxiliary_records = max_auxiliary_records
         
         temp_record = DynamicRecord._build_format(table_schema)
         self.record_size = struct.calcsize(temp_record)
         
-        self.main_file = filename or f"{column_name}_main.dat"
-        self.aux_file = filename.replace('.dat', '_aux.dat') if isinstance(filename, str) else f"{column_name}_aux.dat"
+        if filename:
+            # Add .dat extension if not present
+            if not filename.endswith('.dat'):
+                filename = filename + '.dat'
+            self.main_file = filename
+            self.aux_file = filename.replace('.dat', '_aux.dat')
+        else:
+            self.main_file = f"{column_name}_main.dat"
+            self.aux_file = f"{column_name}_aux.dat"
         
         self._ensure_files_exist()
         
@@ -24,6 +31,10 @@ class SequentialFileIndex(BaseIndex):
     
     def _ensure_files_exist(self):
         for file_path in [self.main_file, self.aux_file]:
+            directory = os.path.dirname(file_path)
+            if directory and not os.path.exists(directory):
+                os.makedirs(directory, exist_ok=True)
+            
             if not os.path.exists(file_path):
                 with open(file_path, 'wb') as f:
                     pass
@@ -78,7 +89,7 @@ class SequentialFileIndex(BaseIndex):
         file_size = os.path.getsize(self.aux_file)
         return file_size // self.record_size
     
-    def get_all_records(self) -> List[Dict[str, Any]]:
+    def getAllRecords(self) -> List[Dict[str, Any]]:
         all_records = []
         
         main_records = self._read_records_from_file(self.main_file)
@@ -89,7 +100,10 @@ class SequentialFileIndex(BaseIndex):
         
         return all_records
     
-    def clear_all_records(self) -> bool:
+    def clear_all(self) -> int:
+        # Count records before clearing
+        count = self._main_record_count + self._get_aux_count()
+        
         with open(self.main_file, 'wb') as f:
             pass
         
@@ -98,7 +112,7 @@ class SequentialFileIndex(BaseIndex):
         
         self._main_record_count = 0
         
-        return True
+        return count
         
     def search(self, key: Any) -> List[Dict[str, Any]]:
         results = []
