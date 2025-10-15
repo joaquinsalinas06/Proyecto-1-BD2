@@ -3,20 +3,10 @@ import os
 import struct
 import hashlib
 from dataclasses import dataclass
-from typing import Generic, Optional, TypeVar, Deque, List, Dict, Any
+from typing import Generic, Optional, TypeVar, Deque, List, Dict, Any, Protocol
 from collections import deque
 from records.indices.base_index import BaseIndex
-
-# from .base_index import BaseIndex
-
-BLOCK_FACTOR = 4
-
-def hash64(s: str) -> int:
-    return int.from_bytes(
-        hashlib.blake2b(s.encode('utf-8'), digest_size=8).digest(),
-        'little',
-        signed=False
-    )
+from .page_btree import Page, Int64Codec, FixedStrCodec
 
 @dataclass
 class ExtractionResult():
@@ -24,77 +14,34 @@ class ExtractionResult():
     right_tree: Optional[int] = -1
     left_tree: Optional[int] = -1
 
-class Page:
-
-    HEADER_FORMAT = f"<iBi{BLOCK_FACTOR}i{BLOCK_FACTOR - 1}Q{BLOCK_FACTOR - 1}i" # count, is_leaf, next, children, keys, is_leaf?
-    HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-    SIZE_OF_PAGE = HEADER_SIZE
-
-    def __init__(self, 
-                 is_leaf : bool = False,
-                 next_page : int = -1
-                 ):
-        self.keys = [0] * (BLOCK_FACTOR - 1) # secondary 
-        self.children = [-1] * BLOCK_FACTOR
-        self.count = 0
-        self.is_leaf = is_leaf
-        self.next_page = next_page
-        self.refs = [-1] * (BLOCK_FACTOR - 1) # PK
-
-    def pack(self) -> None :
-        if not (0 <= self.count <= BLOCK_FACTOR - 1):
-            raise ValueError("count fuera de rango")
-        return struct.pack(
-            self.HEADER_FORMAT,
-            self.count,
-            int(self.is_leaf),
-            self.next_page,
-            *self.children,
-            *self.keys,
-            *self.refs
-        )
-    
-    @staticmethod
-    def unpack(data : bytes) -> Page:    
-        tup = struct.unpack_from(Page.HEADER_FORMAT, data, 0)
-        count = tup[0]
-        is_leaf = tup[1]
-        next_page = tup[2]
-        off = 3
-        children = list(tup[off : off + BLOCK_FACTOR]); off += BLOCK_FACTOR
-        keys = list(tup[off : off + (BLOCK_FACTOR - 1)]); off += (BLOCK_FACTOR - 1)
-        refs = list(tup[off : off + (BLOCK_FACTOR - 1)]); off += (BLOCK_FACTOR - 1)
-
-        p = Page(is_leaf=bool(is_leaf), next_page=int(next_page))
-        p.count = count
-        p.children[:] = children
-        p.keys[:] = keys
-        p.refs[:] = refs
-        return p
-
-    def __repr__(self) -> str:
-        typ = "Leaf" if self.is_leaf else "Internal"
-        if self.is_leaf:
-            return f"Page({typ}, count={self.count}, keys={self.keys}, refs={self.refs}, next_page={self.next_page})"
-        else:
-            return f"Page({typ}, count={self.count}, keys={self.keys}, children={self.children})"
-
-
 class BTreeIndex(BaseIndex):
     def __init__(self, 
                  column_name: str, 
+                 type: str = "str",
                  filename: str = None, 
                  is_primary: bool = False, 
                  primary_key_column: str = None, 
                  M: int = 4
                  ):
+        
+        if M < 3:
+            raise ValueError("M must be greater than 2")
 
         super().__init__(column_name, filename, is_primary, primary_key_column)
 
-        if M < 3:
-            raise ValueError("M must be greater than 2")
+        if type == "int":
+            self.key_codec = Int64Codec()
+        elif type == "str":
+            self.key_codec = FixedStrCodec(size=20)
+        else:
+            raise ValueError(f"type not soported: {type}")
+
         self.root_page = 0
         self.M: int = M
+
+        self.page_size = Page.page_size(self.M, self.key_codec)
+
+        # self._root = Page(key_codec=self.key_codec, is_leaf=True)
 
     def search(self, key: Any) -> List[Dict[str, Any]]:
         """
@@ -135,7 +82,6 @@ class BTreeIndex(BaseIndex):
             i = 0
 
         return out
-
 
     def rangeSearch(self, begin_key: Any, end_key: Any) -> List[Dict[str, Any]]:
         if getattr(self, "root_page", None) is None or self.root_page < 0:
@@ -191,13 +137,12 @@ class BTreeIndex(BaseIndex):
         if self.column_name not in record or self.primary_key_column not in record:
             return False
         
-        sec_val = record[self.column_name]
-        pk_val = record[self.primary_key_column]
-        sec_val = self._encode_key(sec_val)
+        sec_val = self._canon(record[self.column_name])
+        pk_val  = int(record[self.primary_key_column])
         
         if not os.path.exists(self.filename):
             with open(self.filename, 'wb') as file:
-                root_page = Page(is_leaf=True)
+                root_page = Page(block_factor=self.M, key_codec=self.key_codec, is_leaf=True)
                 root_page.keys[0] = sec_val
                 root_page.count = 1
                 root_page.refs[0] = pk_val
@@ -205,16 +150,17 @@ class BTreeIndex(BaseIndex):
             self.root_page = 0
             return True
     
-        split_result = self._insert(self.root_page, sec_val, ref=pk_val)
-        if ( split_result is not None ):
-            parent = Page(is_leaf=False)
+        split_result = self._insert(id=self.root_page, key=sec_val, ref=pk_val)
+
+        if split_result is not None:
+            parent = Page(block_factor=self.M, key_codec=self.key_codec, is_leaf=False)
             parent.keys[0] = split_result.key
             parent.children[0] = self.root_page
             parent.children[1] = split_result.right_tree
             parent.count = 1
-            id_parent = self._set_page_by_id(parent, self._page_count())
-            self.root_page = id_parent
-
+            self.root_page = self._append_page(parent)
+        
+        return True
 
     def remove(self, key: Any) -> bool:
         return True
@@ -227,6 +173,12 @@ class BTreeIndex(BaseIndex):
         """Clears all records (stub - not implemented)"""
         return 0
     
+    def display_pretty(self) -> None:
+        if self._page_count() == 0:
+            print("(árbol vacío)")
+            return
+        self._display_tree(self.root_page, indent="", last=True)
+
     # ---------------------------------
     # ||            UTILS            ||
     # ---------------------------------
@@ -255,13 +207,13 @@ class BTreeIndex(BaseIndex):
             else:
                 return self._split_impar(node, key)
         else:
-            split_result = self._insert(node.children[i], -1, key, ref=ref)
+            split_result = self._insert(node.children[i], key, ref=ref)
             if split_result is not None:
                 if node.count < self.M - 1:
                     self._relocate_right(node, split_result.key, ref, split_result.right_tree)
                     self._set_page_by_id(node, id)
                 elif self.M % 2 == 0:
-                    return self._split_par(node=node, key=split_result.key, id=id, right_tree=split_result.right_tree)
+                    return self._split_par(node=node, key=split_result.key, id=id, ref=ref, right_tree=split_result.right_tree)
                 else:
                     return self._split_impar(node, split_result.key, split_result.right_tree)
         
@@ -271,7 +223,7 @@ class BTreeIndex(BaseIndex):
                    node: Page, 
                    key: Any, 
                    id: int, # reference in index.dat
-                   ref: int = -1,
+                   ref: int, #pk
                    right_tree: Optional[int] = -1,
                    ) -> ExtractionResult[Any]:
         
@@ -343,7 +295,7 @@ class BTreeIndex(BaseIndex):
                              start_from: int
                              ) -> Page:
         
-        right_node = Page(node.is_leaf)
+        right_node = Page(block_factor=self.M, key_codec=self.key_codec, is_leaf=node.is_leaf)
         i, j = start_from, 0
         while i < self.M - 1:
             right_node.keys[j] = node.keys[i]
@@ -397,29 +349,89 @@ class BTreeIndex(BaseIndex):
         if isinstance(val, int):
             return val
         return hash64(val) 
-    
-    def _get_page_by_id(self, idx: int) -> Page:
-        offset = idx * Page.SIZE_OF_PAGE
+        
+    def _get_page_by_id(self, pid: int) -> Page:
+        ps = self.page_size
         with open(self.filename, "rb") as f:
-            f.seek(offset)          
-            data = f.read(Page.SIZE_OF_PAGE)
-        if len(data) < Page.SIZE_OF_PAGE:
-            raise EOFError("incomplete page")
-        return Page.unpack(data)
+            f.seek(pid * ps)
+            data = f.read(ps)
+        if len(data) != ps:
+            raise EOFError(f"incomplete page: pid={pid}, got={len(data)}, expected={ps}")
+        return Page.unpack(data, key_codec=self.key_codec, BLOCK_FACTOR=self.M)
 
-    def _set_page_by_id(self, page: Page, idx: int) -> int:
-        data = page.pack()
-        if len(data) != Page.SIZE_OF_PAGE:
-            raise ValueError("page.pack() size mismatch")
-        offset = idx * Page.SIZE_OF_PAGE
-        with open(self.filename, "r+b") as f:
-            f.seek(offset)          
-            f.write(data)
-        return idx
+    def _set_page_by_id(self, page: Page, pid: int) -> int:
+        blob = page.pack()
+        mode = 'r+b' if os.path.exists(self.filename) else 'wb'
+        with open(self.filename, mode) as f:
+            f.seek(pid * self.page_size)
+            f.write(blob)
+        return pid
     
     def _page_count(self) -> int:
-        size = os.path.getsize(self.filename)
-        if size % Page.SIZE_OF_PAGE != 0:
-            raise ValueError(f"File size: ({size}) is not a multiple of page_size ({Page.SIZE_OF_PAGE}).")
-        return size // Page.SIZE_OF_PAGE
-    
+        try:
+            return os.path.getsize(self.filename) // self.page_size
+        except FileNotFoundError:
+            return 0
+
+    def _append_page(self, page: Page) -> int:
+        pid = self._page_count()
+        return self._set_page_by_id(page, pid)
+
+    def _canon(self, v):
+        return self.key_codec.from_bin(self.key_codec.to_bin(v))
+
+    def _display_tree(self, pid: int, indent: str, last: bool) -> None:
+        """Versión adaptada: carga Page por id y pinta claves y tipo (Leaf/Internal)."""
+        page = self._get_page_by_id(pid)
+        # Construye la línea de este nodo
+        branch = "└" if last else "├"
+        keys_str = ",".join(str(k) for k in page.keys[:page.count])
+        tag = " L" if page.is_leaf else ""
+        print(f"{indent}{branch}[{keys_str}]{tag} (pid={pid})")
+
+        # Si es interno, recorre hijos de izquierda a derecha
+        if not page.is_leaf:
+            # prefijo para hijos: si este fue 'last', ponemos espacios; si no, una barra vertical
+            child_indent = indent + ("  " if last else "│ ")
+            # hijos válidos: page.children[0..count] (pueden haber -1 si aún no poblaste)
+            child_ids = page.children[:page.count + 1]
+            # Dibuja cada hijo
+            for i, cid in enumerate(child_ids):
+                if cid == -1:
+                    continue
+                self._display_tree(cid, child_indent, last=(i == len(child_ids) - 1))
+
+
+    def display_levels(self) -> None:
+        """Imprime el árbol por niveles (BFS). Útil para ver estructura tras splits."""
+        if self._page_count() == 0:
+            print("(árbol vacío)")
+            return
+
+        from collections import deque
+        q = deque([(self.root_page, 0)])
+        cur_level = 0
+        line = []
+
+        def flush(level):
+            if line:
+                print(f"Nivel {level}: " + "   ||   ".join(line))
+
+        while q:
+            pid, level = q.popleft()
+            if level != cur_level:
+                flush(cur_level)
+                line = []
+                cur_level = level
+
+            page = self._get_page_by_id(pid)
+            keys_str = ",".join(str(k) for k in page.keys[:page.count])
+            node_tag = "L" if page.is_leaf else "I"
+            line.append(f"({node_tag}, pid={pid})[{keys_str}]")
+
+            if not page.is_leaf:
+                for cid in page.children[:page.count + 1]:
+                    if cid != -1:
+                        q.append((cid, level + 1))
+
+        flush(cur_level)
