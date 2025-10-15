@@ -3,7 +3,6 @@ from rtree import index
 import os
 from .base_index import SpatialIndex
 
-
 class RTreeIndex(SpatialIndex):
     def __init__(
         self,
@@ -25,7 +24,6 @@ class RTreeIndex(SpatialIndex):
         )
         self.index_file = index_file
 
-        # Create directory if it doesn't exist
         directory = os.path.dirname(self.index_file)
         if directory and not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
@@ -48,7 +46,6 @@ class RTreeIndex(SpatialIndex):
             self.rtree_index = index.Index(self.index_file, properties=p)
 
     def _euclidean_distance(self, point1: Tuple, point2: Tuple) -> float:
-        """Calculate Euclidean distance between two points"""
         squared_sum = 0
         for c1, c2 in zip(point1, point2):
             squared_sum += (c1 - c2)**2
@@ -86,7 +83,6 @@ class RTreeIndex(SpatialIndex):
         if not isinstance(point, (list, tuple)) or len(point) != self.dimensions:
             return []
 
-        # Create search box (MBR) around query point
         min_coords = []
         max_coords = []
         for coord in point:
@@ -94,7 +90,6 @@ class RTreeIndex(SpatialIndex):
             max_coords.append(coord + radius)
         mbr = tuple(min_coords) + tuple(max_coords)
 
-        # Get candidates from box intersection, then filter by actual distance
         results = []
         pk_name = self.primary_key_column
         for item in self.rtree_index.intersection(mbr, objects=True):
@@ -141,7 +136,6 @@ class RTreeIndex(SpatialIndex):
         return removed
 
     def getAllRecords(self) -> List[Dict[str, Any]]:
-        """Returns all records stored in the R-tree index"""
         all_records = []
         pk_name = self.primary_key_column
         bounds = self.rtree_index.bounds
@@ -151,16 +145,12 @@ class RTreeIndex(SpatialIndex):
         return all_records
 
     def clear_all(self) -> int:
-        """Clears all records from the R-tree index"""
         old_count = self._record_count
-
-        # Delete the index files
         for ext in [".dat", ".idx"]:
             filepath = f"{self.index_file}{ext}"
             if os.path.exists(filepath):
                 os.remove(filepath)
 
-        # Recreate empty index
         p = index.Property()
         p.dimension = self.dimensions
         p.leaf_capacity = self.max_entries
