@@ -101,7 +101,7 @@ class SequentialFileIndex(BaseIndex):
         return all_records
     
     def clear_all(self) -> int:
-        # Count records before clearing
+
         count = self._main_record_count + self._get_aux_count()
         
         with open(self.main_file, 'wb') as f:
@@ -191,7 +191,7 @@ class SequentialFileIndex(BaseIndex):
             
             return record_dict
     
-    def rangeSearch(self, begin_key: Any, end_key: Any) -> List[Dict[str, Any]]:
+    def rangeSearch(self, begin_key: Any, end_key: Any, begin_inclusive: bool = True, end_inclusive: bool = True) -> List[Dict[str, Any]]:
         results = []
         
         if os.path.exists(self.main_file):
@@ -209,7 +209,7 @@ class SequentialFileIndex(BaseIndex):
                     
                     mid_key = record[self.column_name]
                     
-                    if mid_key >= begin_key:
+                    if (begin_inclusive and mid_key >= begin_key) or (not begin_inclusive and mid_key > begin_key):
                         start_pos = mid
                         right = mid - 1
                     else:
@@ -227,7 +227,7 @@ class SequentialFileIndex(BaseIndex):
                     
                     mid_key = record[self.column_name]
                     
-                    if mid_key <= end_key:
+                    if (end_inclusive and mid_key <= end_key) or (not end_inclusive and mid_key < end_key):
                         end_pos = mid
                         left = mid + 1
                     else:
@@ -242,7 +242,9 @@ class SequentialFileIndex(BaseIndex):
         aux_records = self._read_records_from_file(self.aux_file)
         for record in aux_records:
             key_value = record[self.column_name]
-            if begin_key <= key_value <= end_key:
+            start_condition = (begin_inclusive and key_value >= begin_key) or (not begin_inclusive and key_value > begin_key)
+            end_condition = (end_inclusive and key_value <= end_key) or (not end_inclusive and key_value < end_key)
+            if start_condition and end_condition:
                 results.append(record)
         
         return results
