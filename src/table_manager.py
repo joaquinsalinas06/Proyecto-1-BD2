@@ -9,8 +9,8 @@ from .parser.ast import (
     InsertStmt, DeleteStmt
 )
 from .parser.sql_parser import SQLParser
-from .records import DynamicRecord
-from .records.indices import create_index
+from src.records import DynamicRecord
+from src.records.indices import create_index
 
 '''
 La clase Table representa una tabla en la base de datos, con su esquema y sus índices, de tal forma
@@ -132,6 +132,9 @@ class TableManager:
                     "type": "execution_error"
                 }
 
+        except NotImplementedError:
+            raise
+
         except Exception as e:
             return {
                 "error": str(e),
@@ -156,7 +159,7 @@ class TableManager:
                 index = create_index(
                     col.index_type,
                     col.name,
-                    filename=f"indices/{table.name}_{col.name}",
+                    filename=f"indices/{table.name}_{col.name}.dat",
                     is_primary=col.is_key,
                     primary_key_column=table.key_column if not col.is_key else None,
                     table_schema=table.columns
@@ -167,7 +170,7 @@ class TableManager:
                 index = create_index(
                     col.index_type,
                     col.name,
-                    filename=f"indices/{table.name}_{col.name}",
+                    filename=f"indices/{table.name}_{col.name}.dat",
                     is_primary=True,
                     primary_key_column=None,
                     table_schema=table.columns
@@ -228,7 +231,7 @@ class TableManager:
                 index = create_index(
                     col.index_type,
                     col.name,
-                    filename=f"indices/{table.name}_{col.name}",
+                    filename=f"indices/{table.name}_{col.name}.dat",
                     is_primary=col.is_key,
                     primary_key_column=table.key_column if not col.is_key else None,
                     table_schema=table.columns
@@ -324,7 +327,12 @@ class TableManager:
             for col_name, index in table.indexes.items():
                 if index is not None:
                     key = record_dict.get(col_name)
-                    index.remove(key)
+                    # Para índices secundarios, pasar la primary key para eliminar solo ese registro específico
+                    if not index.is_primary and table.key_column:
+                        pk_value = record_dict.get(table.key_column)
+                        index.remove(key, primary_key=pk_value)
+                    else:
+                        index.remove(key)
         return deleted_count
 
     '''
@@ -435,6 +443,9 @@ class TableManager:
                     matching_records.append(record)
             return matching_records
 
+        except NotImplementedError:
+            raise
+
         except Exception:
             all_records = table.get_primary_index().getAllRecords()
             matching_records = []
@@ -509,6 +520,9 @@ class TableManager:
                 if record.get(table.key_column) in primary_key_values:
                     matching_records.append(record)
             return matching_records
+
+        except NotImplementedError:
+            raise
 
         except Exception:
 
