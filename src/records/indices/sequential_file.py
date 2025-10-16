@@ -7,16 +7,25 @@ from ...parser.ast import ColumnDef
 
 
 class SequentialFileIndex(BaseIndex):
-    def __init__(self, column_name: str, table_schema: List[ColumnDef], filename: str = None, max_auxiliary_records: int = 5):
-        super().__init__(column_name, filename)
+    def __init__(self, column_name: str, table_schema: List[ColumnDef], filename: str = None, is_primary: bool = False, primary_key_column: str = None, max_auxiliary_records: int = 5):
+        super().__init__(column_name, filename, is_primary, primary_key_column)
         self.table_schema = table_schema
         self.max_auxiliary_records = max_auxiliary_records
+        
+        self._min_bound = None
+        self._max_bound = None
         
         temp_record = DynamicRecord._build_format(table_schema)
         self.record_size = struct.calcsize(temp_record)
         
-        self.main_file = filename or f"{column_name}_main.dat"
-        self.aux_file = filename.replace('.dat', '_aux.dat') if isinstance(filename, str) else f"{column_name}_aux.dat"
+        if filename:
+            if not filename.endswith('.dat'):
+                filename = filename + '.dat'
+            self.main_file = filename
+            self.aux_file = filename.replace('.dat', '_aux.dat')
+        else:
+            self.main_file = f"{column_name}_main.dat"
+            self.aux_file = f"{column_name}_aux.dat"
         
         self._ensure_files_exist()
         
@@ -24,6 +33,10 @@ class SequentialFileIndex(BaseIndex):
     
     def _ensure_files_exist(self):
         for file_path in [self.main_file, self.aux_file]:
+            directory = os.path.dirname(file_path)
+            if directory and not os.path.exists(directory):
+                os.makedirs(directory, exist_ok=True)
+            
             if not os.path.exists(file_path):
                 with open(file_path, 'wb') as f:
                     pass
@@ -33,7 +46,21 @@ class SequentialFileIndex(BaseIndex):
             return 0
         
         file_size = os.path.getsize(self.main_file)
-        return file_size // self.record_size
+        count = file_size // self.record_size
+
+        self._update_bounds()
+        
+        return count
+        
+    def _update_bounds(self):
+        records = self._read_records_from_file(self.main_file)
+        if records:
+            values = [r[self.column_name] for r in records]
+            self._min_bound = min(values)
+            self._max_bound = max(values)
+        else:
+            self._min_bound = None
+            self._max_bound = None
     
     def _write_record_to_file(self, file_path: str, record_data: Dict[str, Any]) -> bool:
         record = DynamicRecord(self.table_schema, **record_data)
@@ -78,7 +105,7 @@ class SequentialFileIndex(BaseIndex):
         file_size = os.path.getsize(self.aux_file)
         return file_size // self.record_size
     
-    def get_all_records(self) -> List[Dict[str, Any]]:
+    def getAllRecords(self) -> List[Dict[str, Any]]:
         all_records = []
         
         main_records = self._read_records_from_file(self.main_file)
@@ -89,7 +116,10 @@ class SequentialFileIndex(BaseIndex):
         
         return all_records
     
-    def clear_all_records(self) -> bool:
+    def clear_all(self) -> int:
+
+        count = self._main_record_count + self._get_aux_count()
+
         with open(self.main_file, 'wb') as f:
             pass
         
@@ -98,7 +128,7 @@ class SequentialFileIndex(BaseIndex):
         
         self._main_record_count = 0
         
-        return True
+        return count
         
     def search(self, key: Any) -> List[Dict[str, Any]]:
         results = []
@@ -177,9 +207,14 @@ class SequentialFileIndex(BaseIndex):
             
             return record_dict
     
-    def rangeSearch(self, begin_key: Any, end_key: Any) -> List[Dict[str, Any]]:
+    def rangeSearch(self, begin_key: Any, end_key: Any, begin_inclusive: bool = True, end_inclusive: bool = True) -> List[Dict[str, Any]]:
         results = []
         
+        if self._max_bound is not None and begin_key is not None and begin_key > self._max_bound:
+            return []
+        if self._min_bound is not None and end_key is not None and end_key < self._min_bound:
+            return []
+            
         if os.path.exists(self.main_file):
             total_records = self._main_record_count
             if total_records > 0:
@@ -195,7 +230,7 @@ class SequentialFileIndex(BaseIndex):
                     
                     mid_key = record[self.column_name]
                     
-                    if mid_key >= begin_key:
+                    if (begin_inclusive and mid_key >= begin_key) or (not begin_inclusive and mid_key > begin_key):
                         start_pos = mid
                         right = mid - 1
                     else:
@@ -213,7 +248,7 @@ class SequentialFileIndex(BaseIndex):
                     
                     mid_key = record[self.column_name]
                     
-                    if mid_key <= end_key:
+                    if (end_inclusive and mid_key <= end_key) or (not end_inclusive and mid_key < end_key):
                         end_pos = mid
                         left = mid + 1
                     else:
@@ -228,7 +263,9 @@ class SequentialFileIndex(BaseIndex):
         aux_records = self._read_records_from_file(self.aux_file)
         for record in aux_records:
             key_value = record[self.column_name]
-            if begin_key <= key_value <= end_key:
+            start_condition = (begin_inclusive and key_value >= begin_key) or (not begin_inclusive and key_value > begin_key)
+            end_condition = (end_inclusive and key_value <= end_key) or (not end_inclusive and key_value < end_key)
+            if start_condition and end_condition:
                 results.append(record)
         
         return results
@@ -237,6 +274,12 @@ class SequentialFileIndex(BaseIndex):
         if self.column_name not in record:
             return False
         
+        value = record[self.column_name]
+        if self._min_bound is None or value < self._min_bound:
+            self._min_bound = value
+        if self._max_bound is None or value > self._max_bound:
+            self._max_bound = value
+            
         self._write_record_to_file(self.aux_file, record)
         
         aux_count = self._get_aux_count()
@@ -255,6 +298,14 @@ class SequentialFileIndex(BaseIndex):
         self._write_all_records_to_file(self.main_file, all_records)
         
         self._main_record_count = len(all_records)
+        
+        if all_records:
+            values = [r[self.column_name] for r in all_records]
+            self._min_bound = min(values)
+            self._max_bound = max(values)
+        else:
+            self._min_bound = None
+            self._max_bound = None
         
         with open(self.aux_file, 'wb') as f:
             pass
