@@ -19,3 +19,4 @@ data/spotify/*
 *.dat
 *.idx
 *.db
+**/tables_metadata.json

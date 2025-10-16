@@ -11,12 +11,11 @@ def clean_indices():
     indices_dir = os.path.join(test_dir, "indices")
     if os.path.exists(indices_dir):
         for file in os.listdir(indices_dir):
-            if file.endswith('.dat'):
-                filepath = os.path.join(indices_dir, file)
-                try:
-                    os.remove(filepath)
-                except:
-                    pass
+            filepath = os.path.join(indices_dir, file)
+            try:
+                os.remove(filepath)
+            except:
+                pass
 
 if __name__ == "__main__":
     print("TEST: Indice RTree (Espacial)\n")
