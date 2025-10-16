@@ -9,8 +9,8 @@ from .parser.ast import (
     InsertStmt, DeleteStmt
 )
 from .parser.sql_parser import SQLParser
-from .records import DynamicRecord
-from .records.indices import create_index
+from src.records import DynamicRecord
+from src.records.indices import create_index
 
 '''
 La clase Table representa una tabla en la base de datos, con su esquema y sus índices, de tal forma
@@ -132,6 +132,9 @@ class TableManager:
                     "type": "execution_error"
                 }
 
+        except NotImplementedError:
+            raise
+
         except Exception as e:
             return {
                 "error": str(e),
@@ -156,7 +159,7 @@ class TableManager:
                 index = create_index(
                     col.index_type,
                     col.name,
-                    filename=f"indices/{table.name}_{col.name}",
+                    filename=f"indices/{table.name}_{col.name}.dat",
                     is_primary=col.is_key,
                     primary_key_column=table.key_column if not col.is_key else None,
                     table_schema=table.columns
@@ -167,7 +170,7 @@ class TableManager:
                 index = create_index(
                     col.index_type,
                     col.name,
-                    filename=f"indices/{table.name}_{col.name}",
+                    filename=f"indices/{table.name}_{col.name}.dat",
                     is_primary=True,
                     primary_key_column=None,
                     table_schema=table.columns
@@ -175,44 +178,63 @@ class TableManager:
                 table.indexes[col.name] = index
 
     '''
-    A partir de un archivo CSV, obtenemos la caberera y la primera fila para inferir los tipos de datos
-    Creamos las columnas y la tabla, y luego insertamos cada uno de los registros en la tabla
-    Ademas, por cada columna que tenga un indice, insertamos el registro en el indice
+    A partir de un archivo CSV, realizamos dos pasadas en streaming (sin cargar todo en memoria):
+    1. Primera pasada: analizar tipos de datos y determinar tamaño óptimo para VARCHAR
+    2. Segunda pasada: insertar registros en los índices
     '''
-    def create_table_from_file(self, table_name: str, file_path: str, 
+    def create_table_from_file(self, table_name: str, file_path: str,
                              index_type: IndexType, key_column: str):
         if table_name in self.tables:
             raise ValueError(f"La tabla '{table_name}' ya existe")
-        
+        column_stats = {}
+
         with open(file_path, 'r', encoding='utf-8') as file:
             reader = csv.DictReader(file)
             headers = reader.fieldnames
-            
+
             if not headers:
                 raise ValueError(f"Archivo '{file_path}' vacío")
-            
-            first_row = next(reader, None)
-            if not first_row:
+
+            for header in headers:
+                column_stats[header] = {
+                    'type': DataType.INT,
+                    'max_length': 0
+                }
+
+            row_count = 0
+            for row in reader:
+                row_count += 1
+                for header in headers:
+                    value = row[header]
+                    stats = column_stats[header]
+
+                    if not value.isdigit() and value:
+                        # Verificar si es FLOAT
+                        if '.' in value and value.replace('.', '').replace('-', '').isdigit():
+                            if stats['type'] == DataType.INT:
+                                stats['type'] = DataType.FLOAT
+                        else:
+                            stats['type'] = DataType.VARCHAR
+                            stats['max_length'] = max(stats['max_length'], len(value))
+                    elif stats['type'] == DataType.VARCHAR:
+                        stats['max_length'] = max(stats['max_length'], len(value))
+
+            if row_count == 0:
                 raise ValueError(f"Archivo '{file_path}' sin datos")
-        
+
         columns = []
         for header in headers:
             is_key = (header == key_column)
             col_index_type = index_type if is_key else None
-        
-            data_type = DataType.VARCHAR
-            size = 50
-            
-            if first_row[header].isdigit():
-                data_type = DataType.INT
-                size = None
-            elif '.' in first_row[header] and first_row[header].replace('.', '').replace('-', '').isdigit():
-                data_type = DataType.FLOAT
-                size = None
-            
+            stats = column_stats[header]
+
+            size = None
+            if stats['type'] == DataType.VARCHAR:
+                size = max(1, int(stats['max_length'] * 1.1))
+
             column = ColumnDef(
                 name=header,
-                data_type=data_type,
+                data_type=stats['type'],
                 size=size,
                 is_key=is_key,
                 index_type=col_index_type
@@ -228,17 +250,19 @@ class TableManager:
                 index = create_index(
                     col.index_type,
                     col.name,
-                    filename=f"indices/{table.name}_{col.name}",
+                    filename=f"indices/{table.name}_{col.name}.dat",
                     is_primary=col.is_key,
                     primary_key_column=table.key_column if not col.is_key else None,
                     table_schema=table.columns
                 )
                 table.indexes[col.name] = index
                 
+        with open(file_path, 'r', encoding='utf-8') as file:
+            reader = csv.DictReader(file)
             for row in reader:
                 for _, index in table.indexes.items():
                     if index is not None:
-                            index.add(row)
+                        index.add(row)
 
     '''
     Insertamos un registro en la tabla, verificando que la tabla exista
@@ -324,7 +348,12 @@ class TableManager:
             for col_name, index in table.indexes.items():
                 if index is not None:
                     key = record_dict.get(col_name)
-                    index.remove(key)
+                    # Para índices secundarios, pasar la primary key para eliminar solo ese registro específico
+                    if not index.is_primary and table.key_column:
+                        pk_value = record_dict.get(table.key_column)
+                        index.remove(key, primary_key=pk_value)
+                    else:
+                        index.remove(key)
         return deleted_count
 
     '''
@@ -435,6 +464,9 @@ class TableManager:
                     matching_records.append(record)
             return matching_records
 
+        except NotImplementedError:
+            raise
+
         except Exception:
             all_records = table.get_primary_index().getAllRecords()
             matching_records = []
@@ -509,6 +541,9 @@ class TableManager:
                 if record.get(table.key_column) in primary_key_values:
                     matching_records.append(record)
             return matching_records
+
+        except NotImplementedError:
+            raise
 
         except Exception:
 
