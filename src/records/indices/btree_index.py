@@ -36,12 +36,10 @@ class BTreeIndex(BaseIndex):
         else:
             raise ValueError(f"type not soported: {type}")
 
-        self.root_page = 0
+        self.root_page = -1
         self.M: int = M
 
         self.page_size = Page.page_size(self.M, self.key_codec)
-
-        # self._root = Page(key_codec=self.key_codec, is_leaf=True)
 
     def search(self, key: Any) -> List[Dict[str, Any]]:
         """
@@ -161,8 +159,22 @@ class BTreeIndex(BaseIndex):
             self.root_page = self._append_page(parent)
         
         return True
-
+    
     def remove(self, key: Any) -> bool:
+        
+        if self.root_page == -1:
+            return True
+        
+        self._remove(self.root_page, key)
+
+        root = self._get_page_by_id(self.root_page)
+
+        if root and root.count == 0:
+            self.root_page = root.children[0]
+
+        if root.count == 0:
+            self.root_page == -1
+
         return True
 
     def getAllRecords(self) -> List[Dict[str, Any]]:
@@ -174,7 +186,7 @@ class BTreeIndex(BaseIndex):
         return 0
     
     def display_pretty(self) -> None:
-        if self._page_count() == 0:
+        if self._page_count() == 0 or self.root_page == -1:
             print("(árbol vacío)")
             return
         self._display_tree(self.root_page, indent="", last=True)
@@ -327,7 +339,7 @@ class BTreeIndex(BaseIndex):
     def _relocate_right(self, 
                         node: Page, 
                         key: Any, 
-                        ref: int,
+                        ref: int = -1,
                         right_tree: int = -1,
                         ) -> None:
         
@@ -422,3 +434,171 @@ class BTreeIndex(BaseIndex):
                         q.append((cid, level + 1))
 
         flush(cur_level)
+
+    def _remove(self, 
+                id: int, 
+                key: Any
+                ) -> None:
+        
+        node = self._get_page_by_id(id)
+
+        i = 0
+        while i < node.count and key > node.keys[i]:
+            i += 1
+
+        if node.is_leaf:
+            if i < node.count and node.keys[i] == key:
+                self._pop_element(node, i)
+                self._set_page_by_id(node, id)
+            return
+
+        self._remove(node.children[i], key)
+
+        left_id  = node.children[i-1] if i > 0 else -1
+        cur_id   = node.children[i]
+        right_id = node.children[i+1] if i < node.count else -1
+
+        nc_iminus = self._get_page_by_id(left_id)  if left_id  != -1 else None
+        nc_i      = self._get_page_by_id(cur_id)   if cur_id   != -1 else None
+        nc_iplus  = self._get_page_by_id(right_id) if right_id != -1 else None
+
+        if nc_i.count < (self.M - 1) // 2:
+            # rotación con izquierdo
+            if i > 0 and nc_iminus.count > (self.M - 1) // 2:
+                if nc_iminus.is_leaf:
+                    self._pop_element(nc_iminus, nc_iminus.count - 1)
+                    self._set_page_by_id(nc_iminus, left_id)
+                # falta verificar si despues del pop queda vacio
+                extract_result = self._extract_last(nc_iminus)
+                self._relocate_left(node=nc_i, key=node.keys[i - 1], left_tree=extract_result.right_tree)
+                node.keys[i - 1] = extract_result.key
+
+                self._set_page_by_id(node, id)
+                self._set_page_by_id(nc_i, cur_id)
+            # rotación con derecho
+            elif i < node.count and nc_iplus.count > (self.M - 1) // 2:
+                extract_result = self._extract_first(nc_iplus)
+                
+                if (nc_i.is_leaf):
+                    self._relocate_right(nc_i, extract_result.key, node.refs[i], right_tree=extract_result.left_tree)
+                else:
+                    self._relocate_right(nc_i, node.keys[i], node.refs[i], right_tree=extract_result.left_tree)
+                node.keys[i] = extract_result.key
+                if not node.is_leaf and not nc_i.is_leaf:
+                    for idx in range(len(nc_i.keys)):
+                        if(nc_i.keys[idx] == key):
+                            ncc_idx = self._get_page_by_id(nc_i.children[idx])
+                            nc_i.keys[idx] = self._max_key(ncc_idx)
+                            break
+
+                self._set_page_by_id(node, id)                
+                self._set_page_by_id(nc_i, cur_id)
+                self._set_page_by_id(nc_iplus, right_id)
+            # join con izquierdo
+            elif i > 0:
+
+                self._join(nc_iminus, node.keys[i - 1], nc_i)
+                deleted_node_id = node.children[i]
+                nc_i.deleted = -1
+                node.children[i] = -1
+                self._pop_element(node, i - 1)
+
+                self._set_page_by_id(node, id)
+                self._set_page_by_id(nc_i, cur_id)
+                self._set_page_by_id(nc_iminus, left_id)
+
+                i = i - 1
+            # join con derecho
+            else:
+                self._join(nc_i, node.keys[i], nc_iplus)
+                nc_iplus.deleted = -1
+                node.children[i + 1] = -1
+                self._pop_element(node, i)
+                if not node.is_leaf and not nc_i.is_leaf:
+                    for idx in range(len(nc_i.keys)):
+                        if(nc_i.keys[idx] == key):
+                            ncc_idx = self._get_page_by_id(nc_i.children[idx])
+                            nc_i.keys[idx] = self._max_key(ncc_idx)
+                            break  
+                self._set_page_by_id(node, id)
+                self._set_page_by_id(nc_i, cur_id)
+                self._set_page_by_id(nc_iplus, right_id)
+
+        
+        if i < node.count and node.keys[i] == key:
+            nc_i = self._get_page_by_id(node.children[i])
+            key = self._max_key(nc_i)
+            node.keys[i] = key
+            self._set_page_by_id(node, id)            
+
+    def _pop_element(self, 
+                     node: Page, 
+                     pos: int
+                     ) -> None:
+        i = pos
+        while i < node.count - 1:
+            node.keys[i] = node.keys[i + 1]
+            node.children[i + 1] = node.children[i + 2]
+            i += 1
+        node.count -= 1
+
+    def _extract_last(self, 
+                      node: Page
+                    ) -> ExtractionResult:
+        result = ExtractionResult()
+        result.key = node.keys[node.count - 1]
+        result.right_tree = node.children[node.count]
+        if (not node.is_leaf):
+            node.count -= 1
+        return result
+
+    def _extract_first(self, 
+                       node: Page
+                       ) -> ExtractionResult:
+        result = ExtractionResult()
+        result.key = node.keys[0]
+        result.left_tree = node.children[0]
+        i = 0
+        while i < node.count - 1:
+            node.keys[i] = node.keys[i + 1]
+            node.children[i] = node.children[i + 1]
+            i += 1
+        node.children[i] = node.children[i + 1]
+        node.count -= 1
+        return result
+    
+    def _relocate_left(self, 
+                       node: Page, 
+                       key: Any, 
+                       left_tree: int=-1
+                       ) -> None:
+        i = node.count - 1
+        while i >= 0 and key < node.keys[i]:
+            node.keys[i + 1] = node.keys[i]
+            node.children[i + 2] = node.children[i + 1]
+            i -= 1
+        node.children[i + 2] = node.children[i + 1]
+        i += 1
+        node.keys[i] = key
+        node.children[i] = left_tree
+        node.count += 1
+
+    def _max_key(self, 
+                 node: Page
+                 ) -> Any:
+        while not node.is_leaf:
+            node = self._get_page_by_id(node.children[node.count])
+        return node.keys[node.count-1] 
+    
+    def _join(self, 
+              left_node: Page, 
+              middle: Any, 
+              right_node: Page
+              ) -> None:
+
+        if not left_node.is_leaf:
+            self._relocate_right(left_node, middle, right_tree=right_node.children[0])
+
+        for i in range(right_node.count):
+            self._relocate_right(left_node, right_node.keys[i], right_tree=right_node.children[i + 1])
+

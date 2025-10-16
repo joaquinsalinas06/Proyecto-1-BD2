@@ -38,6 +38,7 @@ class Page:
             children: BLOCK_FACTOR * i
             keys: (BLOCK_FACTOR - 1) * key_codec.fmt   (dinámico, secondary atr)
             refs: (BLOCK_FACTOR - 1) * q               (PK, int)
+            deleted: i (-2: no)
     """
     def __init__(self,
                  block_factor: int,
@@ -51,7 +52,7 @@ class Page:
 
         # format keys dynamic
         keys_fmt = ''.join([self.key_codec.fmt for _ in range(self.K)])
-        self.HEADER_FORMAT = f"<iBi{self.BLOCK_FACTOR}i" + keys_fmt + f"{self.K}q"
+        self.HEADER_FORMAT = f"<iBii{self.BLOCK_FACTOR}i" + keys_fmt + f"{self.K}q"
 
         self.HEADER_SIZE = struct.calcsize(self.HEADER_FORMAT)
         self.SIZE_OF_PAGE = self.HEADER_SIZE
@@ -63,6 +64,7 @@ class Page:
         self.count: int = 0
         self.is_leaf: bool = is_leaf
         self.next_page: int = next_page
+        self.deleted = -2
     
     def pack(self) -> bytes:
         if not (0 <= self.count <= self.K):
@@ -74,6 +76,7 @@ class Page:
             self.count,
             int(self.is_leaf),
             self.next_page,
+            self.deleted,
             *self.children,
             *keys_bin,
             *self.refs,
@@ -83,13 +86,14 @@ class Page:
     def unpack(data: bytes, key_codec: KeyCodec, BLOCK_FACTOR: int) -> "Page":
         K = BLOCK_FACTOR - 1
         keys_fmt = ''.join([key_codec.fmt for _ in range(K)])
-        HEADER_FORMAT = f"<iBi{BLOCK_FACTOR}i" + keys_fmt + f"{K}q"
+        HEADER_FORMAT = f"<iBii{BLOCK_FACTOR}i" + keys_fmt + f"{K}q"
 
         tup = struct.unpack_from(HEADER_FORMAT, data, 0)
         off = 0
         count = tup[off]; off += 1
         is_leaf = bool(tup[off]); off += 1
         next_page = tup[off]; off += 1
+        deleted = tup[off]; off += 1
 
         children = list(tup[off : off + BLOCK_FACTOR]); off += BLOCK_FACTOR
         raw_keys = list(tup[off : off + K]); off += K
@@ -97,6 +101,7 @@ class Page:
 
         p = Page(key_codec=key_codec, is_leaf=is_leaf, next_page=next_page, block_factor=BLOCK_FACTOR)
         p.count = count
+        p.deleted = deleted
         p.children[:] = children
         p.keys[:] = [key_codec.from_bin(x) for x in raw_keys]
         p.refs[:] = refs
@@ -110,7 +115,7 @@ class Page:
     def compute_format(block_factor: int, key_codec: KeyCodec) -> str:
         K = block_factor - 1
         keys_fmt = ''.join([key_codec.fmt for _ in range(K)])
-        return f"<iBi{block_factor}i" + keys_fmt + f"{K}q"
+        return f"<iBii{block_factor}i" + keys_fmt + f"{K}q"
 
     @staticmethod
     def page_size(block_factor: int, key_codec: KeyCodec) -> int:

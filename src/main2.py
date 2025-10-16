@@ -1,4 +1,3 @@
-# main2.py
 import os
 import sys
 
@@ -68,47 +67,58 @@ def main():
             print("  ! Falló insert:", rec)
 
     dump_index(bplus_int, title="B+ INT (M=4)")
+
     bplus_int.display_pretty()
 
-"""
-    # --------- Caso 2: STR(20) ----------
-    idx_file_str = os.path.join(ROOT, "bplus_str.idx")
-    rm_if_exists(idx_file_str)
+    l = [0,10, 36, 47, 50, 60, 66, 67, 69, 11, 55, 70, 65, 72, 68, 111, 90, 75, 9, 52, 74, 45, 80, 71, 100, 114, 120]
 
-    bplus_str = BTreeIndex(
-        column_name="name",
-        type="str",
-        filename=idx_file_str,
-        is_primary=False,
-        primary_key_column="rid",
-        M=4
-    )
+    for el in l:
+        print(f"Eliminando {el}:")
+        bplus_int.remove(el)
+        bplus_int.display_pretty()
 
-    keys_str = [
-        "ana",
-        "bernardo",
-        "zz-top",
-        "álvaro",
-        "xxxxxxxxxxxxxxxxxxxxLARGO",  # >20 bytes → se trunca
-        "maria",
-        "mario",
-        "alberto",
-        "alejandra",
-        "zeta",
-    ]
-    print("\n-- Insertando STR keys:", keys_str)
-    for rec in records_from_keys(keys_str, pk_start=2000, col_name="name", pk_name="rid"):
-        ok = bplus_str.add(rec)
-        if not ok:
-            print("  ! Falló insert:", rec)
+    bplus_int.display_pretty()
 
-    dump_index(bplus_str, title="B+ STR(20) (M=4)")
+    # # --------- Caso 2: STR(20) ----------
+    # idx_file_str = os.path.join(ROOT, "bplus_str.idx")
+    # rm_if_exists(idx_file_str)
 
-    print("\nNota:")
-    print("- Si tu implementación encadena hojas, revisa 'next_page' en páginas Leaf.")
-    print("- Verás las strings largas truncadas por el codec de 20 bytes.")
-    print("- Deben aparecer páginas Internal si los splits se hicieron bien.")
-"""
+    # bplus_str = BTreeIndex(
+    #     column_name="name",
+    #     type="str",
+    #     filename=idx_file_str,
+    #     is_primary=False,
+    #     primary_key_column="rid",
+    #     M=4
+    # )
+
+    # keys_str = [
+    #     "ana",
+    #     "bernardo",
+    #     "zz-top",
+    #     "álvaro",
+    #     "xxxxxxxxxxxxxxxxxxxxLARGO",  # >20 bytes → se trunca
+    #     "maria",
+    #     "mario",
+    #     "alberto",
+    #     "alejandra",
+    #     "zeta",
+    # ]
+    # print("\n-- Insertando STR keys:", keys_str)
+    # for rec in records_from_keys(keys_str, pk_start=2000, col_name="name", pk_name="rid"):
+    #     ok = bplus_str.add(rec)
+    #     if not ok:
+    #         print("  ! Falló insert:", rec)
+
+    # dump_index(bplus_str, title="B+ STR(20) (M=4)")
+
+    # bplus_str.display_pretty()
+
+    # print("\nNota:")
+    # print("- Si tu implementación encadena hojas, revisa 'next_page' en páginas Leaf.")
+    # print("- Verás las strings largas truncadas por el codec de 20 bytes.")
+    # print("- Deben aparecer páginas Internal si los splits se hicieron bien.")
+
 
 if __name__ == "__main__":
     main()
