@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Datos temporales (no copiar al contenedor en build, pero sí montar como volumen)
+indices/*.dat
+indices/*.idx
+api/indices/*.dat
+api/indices/*.idx
+
+# Node modules (se instalan en el contenedor)
+node_modules/
+.next/
+
+# Tests
+tests/indices/
+
+# Logs
+*.log
