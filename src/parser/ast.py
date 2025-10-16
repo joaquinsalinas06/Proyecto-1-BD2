@@ -50,11 +50,6 @@ class Value:
     type: DataType
 
 @dataclass
-class Point:
-    x: float
-    y: float
-
-@dataclass
 class CompCond:
     column: str
     operator: CompOp
@@ -71,14 +66,14 @@ class BetweenCond:
 @dataclass
 class SpatialInCond:
     column: str
-    point: Point
+    point: tuple  # N-dimensional coordinates
     radius: float
 
 
 @dataclass
 class SpatialKNNCond:
     column: str
-    point: Point
+    point: tuple  # N-dimensional coordinates
     k: int
 
 

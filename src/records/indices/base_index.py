@@ -48,25 +48,27 @@ class SpatialIndex(BaseIndex):
 
 def create_index(index_type: IndexType, column_name: str, filename: str = None,
                 is_primary: bool = False, primary_key_column: str = None, table_schema=None) -> BaseIndex:
-    from .rtree_index import RTreeIndex
-    from .extendible_hash import ExtendibleHashIndex
-    from .btree_index import BTreeIndex
-    from .sequential_file import SequentialFileIndex
-    from .isam_index import ISAMIndex
 
     if index_type == IndexType.SEQ:
+        from .sequential_file import SequentialFileIndex
+        if not table_schema:
+            raise ValueError("SequentialFileIndex requires table_schema")
         return SequentialFileIndex(column_name, table_schema, filename, is_primary, primary_key_column)
 
     elif index_type == IndexType.ISAM:
+        from .isam_index import ISAMIndex
         return ISAMIndex(column_name, filename, is_primary, primary_key_column)
 
     elif index_type == IndexType.BTREE:
+        from .btree_index import BTreeIndex
         return BTreeIndex(column_name, filename, is_primary, primary_key_column)
 
     elif index_type == IndexType.HASH:
+        from .extendible_hash import ExtendibleHashIndex
         return ExtendibleHashIndex(column_name, filename, is_primary, primary_key_column)
 
     elif index_type == IndexType.RTREE:
+        from .rtree_index import RTreeIndex
         #Esto es por si no definieron dimensiones en el schema, por defecto 2
         dimensiones = 2
         if table_schema:

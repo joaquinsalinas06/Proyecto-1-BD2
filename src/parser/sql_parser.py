@@ -386,12 +386,9 @@ class SQLParser:
 
             self._consume(TokenType.RPAREN, "Se esperaba ')'")
 
-            # Si son exactamente 2 números, tratarlo como punto espacial
-            if len(values) == 2 and all(isinstance(v, (int, float)) for v in values):
-                point = Point(float(values[0]), float(values[1]))
-                return Value(point, DataType.ARRAY)
-
-            return Value(values, DataType.ARRAY)
+            # All tuples are treated as arrays (including spatial points)
+            # Convert to tuple for consistency
+            return Value(tuple(values), DataType.ARRAY)
         
         elif self._check(TokenType.LBRACKET):
             self._consume(TokenType.LBRACKET, "Se esperaba '['")
@@ -405,20 +402,29 @@ class SQLParser:
         else:
             raise ParseError(f"Valor inesperado: {self._peek().lexeme}")
     
-    def _parse_point(self) -> Point:
+    def _parse_point(self) -> tuple:
         self._consume(TokenType.LPAREN, "Se esperaba '('")
-        
-        x_token = self._consume_number("Se esperaba coordenada X")
-        x = float(x_token.lexeme)
-        
-        self._consume(TokenType.COMMA, "Se esperaba ','")
-        
-        y_token = self._consume_number("Se esperaba coordenada Y")
-        y = float(y_token.lexeme)
-        
+
+        coordinates = []
+
+        # Parse first coordinate
+        coord_token = self._consume_number("Se esperaba coordenada")
+        coordinates.append(float(coord_token.lexeme))
+
+        # Parse remaining coordinates
+        while self._match(TokenType.COMMA):
+            # Check if next token is a number (coordinate) or closing paren
+            if self._check(TokenType.RPAREN):
+                # This comma was for the next parameter (radius or k), not another coordinate
+                self.current -= 1  # Put the comma back
+                break
+
+            coord_token = self._consume_number("Se esperaba coordenada")
+            coordinates.append(float(coord_token.lexeme))
+
         self._consume(TokenType.RPAREN, "Se esperaba ')'")
-        
-        return Point(x, y)
+
+        return tuple(coordinates)
     
     def _parse_number_or_string(self):
         if self._check(TokenType.INTEGER) or self._check(TokenType.FLOAT):
