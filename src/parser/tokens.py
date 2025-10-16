@@ -30,6 +30,7 @@ class TokenType(Enum):
     ASC = "ASC"
     DESC = "DESC"
     KEY = "KEY"
+    PRIMARY = "PRIMARY"
     INT = "INT"
     FLOAT_TYPE = "FLOAT"
     VARCHAR = "VARCHAR"
@@ -94,6 +95,7 @@ KEYWORDS = {
     'ASC': TokenType.ASC,
     'DESC': TokenType.DESC,
     'KEY': TokenType.KEY,
+    'PRIMARY': TokenType.PRIMARY,
     'INT': TokenType.INT,
     'FLOAT': TokenType.FLOAT_TYPE,
     'VARCHAR': TokenType.VARCHAR,

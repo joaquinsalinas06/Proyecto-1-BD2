@@ -7,7 +7,7 @@ from .parser.ast import (
     CompCond, BetweenCond, SpatialInCond,
     SpatialKNNCond, LogicCond, Statement,
     CreateTableStmt, CreateTableFileStmt, SelectStmt,
-    InsertStmt, DeleteStmt
+    InsertStmt, DeleteStmt, IndexSpec
 )
 from .parser.sql_parser import SQLParser
 from src.records import DynamicRecord
@@ -57,10 +57,9 @@ class Table:
 class TableManager:
     def __init__(self):
         self.tables: Dict[str, Table] = {}
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.data_directory = os.path.join(project_root, "data")
-        os.makedirs(self.data_directory, exist_ok=True)
-        self.metadata_file = os.path.join(self.data_directory, "tables_metadata.json")
+        self.indices_directory = "indices"
+        os.makedirs(self.indices_directory, exist_ok=True)
+        self.metadata_file = os.path.join(self.indices_directory, "tables_metadata.json")
 
         self.parser = SQLParser()
         self._load_table_metadata()
@@ -88,8 +87,7 @@ class TableManager:
                 }
 
             elif isinstance(stmt, CreateTableFileStmt):
-                self.create_table_from_file(stmt.table_name, stmt.file_path,
-                                          stmt.index_type, stmt.key_column)
+                self.create_table_from_file(stmt.table_name, stmt.file_path, stmt.indexes)
                 return {
                     "type": "create_table_from_file",
                     "message": f"Tabla '{stmt.table_name}' creada desde archivo",
@@ -186,12 +184,25 @@ class TableManager:
     1. Primera pasada: analizar tipos de datos y determinar tamaño óptimo para VARCHAR
     2. Segunda pasada: insertar registros en los índices
     '''
-    def create_table_from_file(self, table_name: str, file_path: str,
-                             index_type: IndexType, key_column: str):
+    def create_table_from_file(self, table_name: str, file_path: str, indexes: List['IndexSpec']):
         if table_name in self.tables:
             raise ValueError(f"La tabla '{table_name}' ya existe")
+
+        # Extraer la columna primaria y crear diccionario de índices por columna
+        primary_index_spec = None
+        index_specs_by_column = {}
+
+        for index_spec in indexes:
+            index_specs_by_column[index_spec.column_name] = index_spec
+            if index_spec.is_primary:
+                primary_index_spec = index_spec
+
+        if not primary_index_spec:
+            raise ValueError("Debe especificar un índice primario")
+
         column_stats = {}
 
+        # Primera pasada: Obtenemos estadísticas de las columnas
         with open(file_path, 'r', encoding='utf-8') as file:
             reader = csv.DictReader(file)
             headers = reader.fieldnames
@@ -212,6 +223,7 @@ class TableManager:
                     value = row[header].strip()
                     stats = column_stats[header]
 
+                    # Detectar formato de ubicación "(lat,lon)"
                     if value.startswith('(') and value.endswith(')') and ',' in value:
                         stats['type'] = DataType.ARRAY
                         continue
@@ -229,10 +241,12 @@ class TableManager:
             if row_count == 0:
                 raise ValueError(f"Archivo '{file_path}' sin datos")
 
+        # Construimos el esquema con índices
         columns = []
         for header in headers:
-            is_key = (header == key_column)
-            col_index_type = index_type if is_key else None
+            is_key = (header == primary_index_spec.column_name)
+            index_spec = index_specs_by_column.get(header)
+            col_index_type = index_spec.index_type if index_spec else None
             stats = column_stats[header]
 
             size = None
@@ -247,11 +261,11 @@ class TableManager:
                 index_type=col_index_type
             )
             columns.append(column)
-        
-    
+
         table = Table(table_name, columns)
         self.tables[table_name] = table
 
+        # Crear índices
         for col in table.columns:
             if col.index_type:
                 index = create_index(
@@ -263,7 +277,8 @@ class TableManager:
                     table_schema=table.columns
                 )
                 table.indexes[col.name] = index
-                
+
+        # Segunda pasada: insertar registros en índices
         with open(file_path, 'r', encoding='utf-8') as file:
             reader = csv.DictReader(file)
             for row in reader:

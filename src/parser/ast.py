@@ -100,11 +100,16 @@ class CreateTableStmt:
 
 
 @dataclass
+class IndexSpec:
+    index_type: IndexType
+    column_name: str
+    is_primary: bool = False
+
+@dataclass
 class CreateTableFileStmt:
     table_name: str
     file_path: str
-    index_type: IndexType
-    key_column: str
+    indexes: List[IndexSpec]  # Lista de especificaciones de índices
 
 
 @dataclass
