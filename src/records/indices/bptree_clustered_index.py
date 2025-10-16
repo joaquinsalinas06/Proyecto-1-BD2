@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import Generic, Optional, TypeVar, Deque, List, Dict, Any, Protocol
 from collections import deque
 from records.indices.base_index import BaseIndex
-from .page_btree import Page, Int64Codec, FixedStrCodec
+from records.record import DynamicRecord
+# from ...parser.ast import ColumnDef
+from parser.ast import ColumnDef
+from .page_btree_clustered import Page, Int64Codec, FixedStrCodec
+
 
 @dataclass
 class ExtractionResult():
@@ -15,12 +19,13 @@ class ExtractionResult():
     left_tree: Optional[int] = -1
 
 class BTreeIndex(BaseIndex):
+
     def __init__(self, 
-                 column_name: str, 
-                 type: str = "str",
+                 column_name: str,        # supposed to be Id 
+                 table_schema: List[ColumnDef],
                  filename: str = None, 
-                 is_primary: bool = False, 
-                 primary_key_column: str = None, 
+                 is_primary: bool = True, # true always bc is clustered
+                 primary_key_column: str = None,
                  M: int = 4
                  ):
         
@@ -29,24 +34,37 @@ class BTreeIndex(BaseIndex):
 
         super().__init__(column_name, filename, is_primary, primary_key_column)
 
-        if type == "int":
+        col = next((c for c in table_schema if c.name == column_name), None)
+
+        if col is None:
+            raise ValueError(f"Columna '{column_name}' no existe en el schema")
+
+        dt = col.data_type.value.upper()
+
+        if dt == "INT":
             self.key_codec = Int64Codec()
-        elif type == "str":
+        elif dt == "VARCHAR":
             self.key_codec = FixedStrCodec(size=20)
         else:
             raise ValueError(f"type not soported: {type}")
+        
+        self.table_schema = table_schema
+        temp_record = DynamicRecord._build_format(table_schema)
+        self.RECORD_SIZE = struct.calcsize(temp_record)
 
         self.root_page = -1
         self.M: int = M
 
-        self.page_size = Page.page_size(self.M, self.key_codec)
+        self.page_size = Page.page_size(
+            block_factor=self.M, 
+            key_codec=self.key_codec,
+            record_size=self.RECORD_SIZE
+            )
 
     def search(self, key: Any) -> List[Dict[str, Any]]:
         """
-        Busca por igualdad:
-        - int  -> usa el valor tal cual
-        - str  -> usa self._encode_key (p.ej., hash64)  [SOLO igualdad]
-        Devuelve lista de dicts: {"primary_key": pk}
+            Igualdad sobre índice clustered (sin duplicados).
+            Devuelve: [{"primary_key": pk}] o [] si no existe.
         """
         out: List[Dict[str, Any]] = []
 
@@ -54,104 +72,118 @@ class BTreeIndex(BaseIndex):
         if pid is None or pid < 0:
             return out
 
-        key_code = self._encode_key(key)
-
+        # place in leafs
         while True:
             node = self._get_page_by_id(pid)
             if node.is_leaf:
                 break
-            i = self._lower_bound(node.keys, node.count, key_code)
+            i = self._lower_bound(node.keys, node.count, key)
             child_pid = node.children[i]
             if child_pid is None or child_pid < 0:
                 return out
             pid = child_pid
 
-        i = self._lower_bound(node.keys, node.count, key_code)
-        while True:
-            while i < node.count and node.keys[i] == key_code:
-                out.append({"primary_key": int(node.refs[i])})
-                i += 1
-            if node.next_page is None or node.next_page == -1:
-                break
-            nxt = self._get_page_by_id(node.next_page)
-            if nxt.count == 0 or nxt.keys[0] != key_code:
-                break
-            node = nxt
-            i = 0
+        i = self._lower_bound(node.keys, node.count, key)
+
+        if i < node.count and node.keys[i] == key:
+            rec = node.records[i] if i < len(node.records) else None
+            if rec is not None:
+                pk_name = getattr(self, "primary_key_column", None)
+                pk_val = getattr(rec, pk_name, None) if pk_name else None
+                out.append({"primary_key": pk_val})
+            else:
+                out.append({"primary_key": None})
 
         return out
 
     def rangeSearch(self, begin_key: Any, end_key: Any) -> List[Dict[str, Any]]:
-        if getattr(self, "root_page", None) is None or self.root_page < 0:
-            return []
+        """
+            Rango [begin_key, end_key] sobre índice clustered.
+            Devuelve: [{"primary_key": pk}, ...] en orden ascendente por clave.
+        """
+        out: List[Dict[str, Any]] = []
 
-        lo_code = self._encode_key(begin_key)
-        hi_code = self._encode_key(end_key)
+        pid = getattr(self, "root_page", None)
+        if pid is None or pid < 0:
+            return out
 
-        if lo_code > hi_code:
-            lo_code, hi_code = hi_code, lo_code
+        lo, hi = (begin_key, end_key) if begin_key <= end_key else (end_key, begin_key)
 
-        if isinstance(begin_key, str) or isinstance(end_key, str):
-            raise ValueError("rangeSearch in strings is not valid")
-
-        out: list[dict[str, Any]] = []
-
-        pid = self.root_page
+        # desciende hasta la hoja que contendría 'lo'
         while True:
             node = self._get_page_by_id(pid)
             if node.is_leaf:
                 break
-            i = self._lower_bound(node.keys, node.count, lo_code)
+            i = self._lower_bound(node.keys, node.count, lo)
             child_pid = node.children[i]
             if child_pid is None or child_pid < 0:
-                # índice inconsistente
                 return out
             pid = child_pid
 
-        leaf = node
-        j = self._lower_bound(leaf.keys, leaf.count, lo_code)
+        # posición inicial en la hoja
+        i = self._lower_bound(node.keys, node.count, lo)
 
         while True:
-            while j < leaf.count:
-                k = leaf.keys[j]
+            while i < node.count:
+                k = node.keys[i]
                 if k is None:
-                    j += 1
+                    i += 1
                     continue
-                if k > hi_code:
+                if k > hi:
                     return out
-                pk = leaf.refs[j]
-                out.append({"primary_key": pk})
-                j += 1
 
-            if leaf.next_page is None or leaf.next_page == -1:
+                rec = node.records[i] if i < len(node.records) else None
+                if rec is not None and getattr(self, "primary_key_column", None):
+                    pk = getattr(rec, self.primary_key_column, None)
+                else:
+                    pk = None
+                out.append({"primary_key": pk})
+                i += 1
+
+            # pasa a la siguiente hoja
+            if node.next_page is None or node.next_page == -1:
                 break
-            leaf = self._get_page_by_id(leaf.next_page)
-            j = 0
+            node = self._get_page_by_id(node.next_page)
+            i = 0
 
         return out
 
+
     def add(self, record: Dict[str, Any]) -> bool:
 
-        if self.column_name not in record or self.primary_key_column not in record:
-            return False
-        
-        sec_val = self._canon(record[self.column_name])
-        pk_val  = int(record[self.primary_key_column])
-        
+        key = record[self.column_name]
+
+        dynamic_record = DynamicRecord(self.table_schema, **record)
+
         if not os.path.exists(self.filename):
+            
             with open(self.filename, 'wb') as file:
-                root_page = Page(block_factor=self.M, key_codec=self.key_codec, is_leaf=True)
-                root_page.keys[0] = sec_val
+                root_page = Page(
+                    block_factor=self.M, 
+                    key_codec=self.key_codec, 
+                    is_leaf=True,
+                    record_size=self.RECORD_SIZE # 9
+                    )
+                root_page.keys[0] = key
                 root_page.count = 1
-                root_page.refs[0] = pk_val
+                root_page.records[0] = dynamic_record
                 file.write(root_page.pack())
             self.root_page = 0
             return True
     
-        split_result = self._insert(id=self.root_page, key=sec_val, ref=pk_val)
+        split_result = self._insert(
+            id=self.root_page, 
+            key=key, 
+            record=dynamic_record
+            )
 
         if split_result is not None:
-            parent = Page(block_factor=self.M, key_codec=self.key_codec, is_leaf=False)
+            parent = Page(
+                block_factor=self.M, 
+                key_codec=self.key_codec, 
+                is_leaf=False,
+                record_size=self.RECORD_SIZE
+                )
             parent.keys[0] = split_result.key
             parent.children[0] = self.root_page
             parent.children[1] = split_result.right_tree
@@ -186,21 +218,19 @@ class BTreeIndex(BaseIndex):
         return 0
     
     def display_pretty(self) -> None:
+        
         if self._page_count() == 0 or self.root_page == -1:
             print("(árbol vacío)")
             return
+        
         self._display_tree(self.root_page, indent="", last=True)
 
     def display_range(self,
-                  lo: Any,
-                  hi: Any,
-                  inclusive: tuple[bool, bool] = (True, True),
-                  show_pid: bool = True,
-                  show_idx: bool = False) -> None:
-        """
-        Imprime todas las (key, ref) en el rango [lo, hi] (o según `inclusive`).
-        Recorre solo hojas usando next_page. No modifica el árbol.
-        """
+                    lo: Any,
+                    hi: Any,
+                    inclusive: tuple[bool, bool] = (True, True),
+                    show_pid: bool = True,
+                    show_idx: bool = False) -> None:
         if self._page_count() == 0 or self.root_page == -1:
             print("(árbol vacío)")
             return
@@ -210,7 +240,7 @@ class BTreeIndex(BaseIndex):
             return
 
         if lo > hi:
-            lo, hi = hi, lo  
+            lo, hi = hi, lo
 
         start_pid = self._find_leaf_for(lo)
         if start_pid == -1:
@@ -225,20 +255,46 @@ class BTreeIndex(BaseIndex):
             page = self._get_page_by_id(pid)
             for j in range(page.count):
                 k = page.keys[j]
+
+                # bordes del rango
                 if k < lo or (k == lo and not left_inc):
                     continue
                 if k > hi or (k == hi and not right_inc):
                     pid = -1
                     break
-                ref = page.refs[j] if j < len(page.refs) else None
+
+                rec = None
+                if j < len(page.records):
+                    rec = page.records[j]  # DynamicRecord o None
+
+                # construir metadatos opcionales
                 meta = []
                 if show_pid:
                     meta.append(f"pid={pid}")
                 if show_idx:
                     meta.append(f"idx={j}")
                 meta_str = f" ({', '.join(meta)})" if meta else ""
-                print(f"{k} -> {ref}{meta_str}")
+
+                # qué mostrar del record
+                if rec is None:
+                    print(f"{k}{meta_str}")
+                else:
+                    # si tienes primary_key_column configurado, muéstralo
+                    pk_str = None
+                    if getattr(self, "primary_key_column", None):
+                        pk_name = self.primary_key_column
+                        pk_str = getattr(rec, pk_name, None)
+                    if pk_str is not None:
+                        print(f"{k} -> {pk_str}{meta_str}")
+                    else:
+                        # fallback: imprime todas las columnas del DynamicRecord
+                        cols = []
+                        for col in rec.schema:
+                            cols.append(f"{col.name}={getattr(rec, col.name)}")
+                        print(f"{k} -> {{ {', '.join(cols)} }}{meta_str}")
+
                 printed += 1
+
             if pid != -1:
                 pid = page.next_page
 
@@ -251,9 +307,9 @@ class BTreeIndex(BaseIndex):
 
     def _insert(self, 
                 id: int, # id of page in index.dat
-                key: Any, # secondary atr - int or str
-                ref: int # PK - int
-                ) -> Optional[ExtractionResult[Any]]:
+                key: Any, # PK
+                record: DynamicRecord 
+                ) -> Optional[ExtractionResult]:
         
         node = self._get_page_by_id(id)
 
@@ -266,20 +322,20 @@ class BTreeIndex(BaseIndex):
         
         if node.is_leaf:
             if node.count < self.M - 1:
-                self._relocate(node, key, ref)
+                self._relocate(node, key, record)
                 self._set_page_by_id(node, id)
             elif ( self.M % 2 == 0 ):
-                return self._split_par(node=node, key=key, id=id, ref=ref)
+                return self._split_par(node=node, key=key, id=id, record=record)
             else:
                 return self._split_impar(node, key)
         else:
-            split_result = self._insert(node.children[i], key, ref=ref)
+            split_result = self._insert(id=node.children[i], key=key, record=record)
             if split_result is not None:
                 if node.count < self.M - 1:
-                    self._relocate_right(node, split_result.key, ref, split_result.right_tree)
+                    self._relocate_right(node=node, key=split_result.key, record=record, right_tree=split_result.right_tree)
                     self._set_page_by_id(node, id)
                 elif self.M % 2 == 0:
-                    return self._split_par(node=node, key=split_result.key, id=id, ref=ref, right_tree=split_result.right_tree)
+                    return self._split_par(node=node, key=split_result.key, id=id, record=record, right_tree=split_result.right_tree)
                 else:
                     return self._split_impar(node, split_result.key, split_result.right_tree)
         
@@ -289,7 +345,7 @@ class BTreeIndex(BaseIndex):
                    node: Page, 
                    key: Any, 
                    id: int, # reference in index.dat
-                   ref: int, #pk
+                   record: DynamicRecord,
                    right_tree: Optional[int] = -1,
                    ) -> ExtractionResult[Any]:
         
@@ -305,11 +361,11 @@ class BTreeIndex(BaseIndex):
                 else:
                     middle = key
                 right_node = self._generate_right_node(node, m)
-            self._relocate_right(node, key, ref, right_tree)
+            self._relocate_right(node=node, key=key, record=record, right_tree=right_tree)
         else:
             if ( node.is_leaf ):
                 node.count += 1
-                self._relocate_right(right_node, key, ref, right_tree)
+                self._relocate_right(node=right_node, key=key, record=record, right_tree=right_tree)
             else:
                 if key < node.keys[m + 1]:
                     middle = key
@@ -320,7 +376,7 @@ class BTreeIndex(BaseIndex):
                     m = m + 1 if ( node.is_leaf ) else m + 2
                     right_node = self._generate_right_node(node, m)
                     node.count = node.count if node.is_leaf else node.count +1
-                    self._relocate_right(right_node, key, ref, right_tree)
+                    self._relocate_right(node=right_node, key= key, record=record, right_tree=right_tree)
 
         right_node.next_page = node.next_page
         new_id_right_node = self._set_page_by_id(right_node, self._page_count())
@@ -361,12 +417,17 @@ class BTreeIndex(BaseIndex):
                              start_from: int
                              ) -> Page:
         
-        right_node = Page(block_factor=self.M, key_codec=self.key_codec, is_leaf=node.is_leaf)
+        right_node = Page(
+            block_factor=self.M, 
+            key_codec=self.key_codec, 
+            is_leaf=node.is_leaf,
+            record_size=self.RECORD_SIZE
+            )
         i, j = start_from, 0
         while i < self.M - 1:
             right_node.keys[j] = node.keys[i]
-            right_node.children[j] = node.children[i] # for ints
-            right_node.refs[j] = node.refs[i] # for leafs
+            right_node.children[j] = node.children[i] 
+            right_node.records[j] = node.records[i] 
             i += 1
             j += 1       
         right_node.children[j] = node.children[i]
@@ -377,23 +438,23 @@ class BTreeIndex(BaseIndex):
     def _relocate(self, 
                   node: Page, 
                   key: Any, 
-                  ref: int
+                  record: DynamicRecord
                   ) -> None:
         
         i = node.count - 1
         while ( i >= 0 and key < node.keys[i] ):
             node.keys[i + 1] = node.keys[i]
-            node.refs[i + 1] = node.refs[i]
+            node.records[i + 1] = node.records[i]
             i -= 1
         i += 1
         node.keys[i] = key
-        node.refs[i] = ref
+        node.records[i] = record
         node.count += 1
 
     def _relocate_right(self, 
                         node: Page, 
                         key: Any, 
-                        ref: int = -1,
+                        record: Optional[DynamicRecord],
                         right_tree: int = -1,
                         ) -> None:
         
@@ -402,13 +463,13 @@ class BTreeIndex(BaseIndex):
         while i >= 0 and key < node.keys[i]:
             node.keys[i + 1] = node.keys[i]
             node.children[i + 2] = node.children[i + 1]
-            node.refs[i + 1] = node.refs[i]
+            node.records[i + 1] = node.records[i]
             i -= 1
 
         i += 1
         node.keys[i] = key
         node.children[i + 1] = right_tree
-        node.refs[i] = ref
+        node.records[i] = record
         node.count += 1
         
     def _get_page_by_id(self, pid: int) -> Page:
@@ -418,7 +479,13 @@ class BTreeIndex(BaseIndex):
             data = f.read(ps)
         if len(data) != ps:
             raise EOFError(f"incomplete page: pid={pid}, got={len(data)}, expected={ps}")
-        return Page.unpack(data, key_codec=self.key_codec, BLOCK_FACTOR=self.M)
+        return Page.unpack(
+            data, 
+            key_codec=self.key_codec, 
+            BLOCK_FACTOR=self.M,
+            RECORD_SIZE=self.RECORD_SIZE,
+            table_schema=self.table_schema
+            )
 
     def _set_page_by_id(self, page: Page, pid: int) -> int:
         blob = page.pack()
@@ -592,6 +659,7 @@ class BTreeIndex(BaseIndex):
         while i < node.count - 1:
             node.keys[i] = node.keys[i + 1]
             node.children[i + 1] = node.children[i + 2]
+            node.records[i] = node.records[i + 1]
             i += 1
         node.count -= 1
 
@@ -668,3 +736,20 @@ class BTreeIndex(BaseIndex):
                 i += 1
             pid = node.children[i]
         return -1
+
+    def _lower_bound(self, arr, n, x):
+        """
+        Devuelve el índice más pequeño i en [0, n] tal que arr[i] >= x.
+        Si todos los arr[0..n-1] < x, retorna n.
+        - arr: lista de claves del nodo (puede tener basura después de n)
+        - n:   node.count (número de claves válidas)
+        - x:   clave a buscar (ya codificada si corresponde)
+        """
+        lo, hi = 0, n
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if arr[mid] < x:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo

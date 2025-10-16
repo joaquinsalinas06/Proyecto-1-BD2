@@ -1,18 +1,19 @@
 import os
 import sys
 
-# Asegura que 'src' (este dir) esté en sys.path cuando ejecutas: python3 src/main2.py
+# Asegura que 'src' esté en sys.path
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-# Importa tus clases reales (ajusta si tus módulos se llaman distinto)
-from records.indices.btree_index import BTreeIndex
-from records.indices.page_btree import Page, FixedStrCodec, Int64Codec
+from records.indices.bptree_clustered_index import BTreeIndex
+from records.indices.page_btree_clustered import Page
+from parser.ast import ColumnDef, DataType  # asumiendo estos nombres
 
 # ---------- Helpers ----------
 def page_size_for(index) -> int:
-    return Page.page_size(index.M, index.key_codec)
+    # el índice ya calcula y expone page_size
+    return index.page_size
 
 def file_page_count(filename: str, page_size: int) -> int:
     return 0 if not os.path.exists(filename) else os.path.getsize(filename) // page_size
@@ -28,97 +29,109 @@ def dump_index(index, title: str):
         for pid in range(n):
             f.seek(pid * ps)
             data = f.read(ps)
-            page = Page.unpack(data, key_codec=index.key_codec, BLOCK_FACTOR=index.M)
-            print(f"[pid={pid}] {page}")
+            page = Page.unpack(
+                data=data,
+                key_codec=index.key_codec,
+                BLOCK_FACTOR=index.M,
+                RECORD_SIZE=index.RECORD_SIZE,
+                table_schema=index.table_schema,
+            )
+            # print(f"[pid={pid}] {page}")
 
 def rm_if_exists(path: str):
-    try: os.remove(path)
-    except FileNotFoundError: pass
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
 
 def records_from_keys(keys, pk_start=1000, col_name="k", pk_name="rid"):
     rid = pk_start
     for k in keys:
+        # DynamicRecord exige todas las columnas del schema
         yield {col_name: k, pk_name: rid}
         rid += 1
+def _get_pks(res):
+    return [d.get("primary_key") for d in (res or [])]
 
+# ---------- Main ----------
 # ---------- Main ----------
 def main():
     print("=== PRUEBA B+ INSERT (solo) ===")
 
-    # --------- Caso 1: INT ----------
+    # ---- schema mínimo: columna indexada + pk ----
+    table_schema_int = [
+        ColumnDef(name="k",   data_type=DataType.INT),
+        ColumnDef(name="rid", data_type=DataType.INT),
+    ]
+
+    # --------- Caso 1: índice clustered por RID ----------
     idx_file_int = os.path.join(ROOT, "bplus_int.idx")
     rm_if_exists(idx_file_int)
 
     bplus_int = BTreeIndex(
-        column_name="k",
-        type="int",
+        column_name="rid",            # índice sobre 'rid' (clustered)
+        table_schema=table_schema_int,
         filename=idx_file_int,
-        is_primary=False,
+        is_primary=True,
         primary_key_column="rid",
-        M=4
+        M=4,
     )
 
-    keys_int = [45, 75, 100, 36, 120, 70, 11, 111, 47, 114, 74, 50, 52, 55, 72, 71, 60, 65, 67, 69, 68, 66, 80, 90, 0, 10, 9]
+    import random
 
-    print("\n-- Insertando INT keys:", keys_int)
-    for rec in records_from_keys(keys_int, pk_start=1000, col_name="k", pk_name="rid"):
+    # PKs base
+    pk_int = [45, 75, 100, 36, 120, 70, 11, 111, 47, 114, 74, 50, 52, 55, 72, 71,
+            60, 65, 67, 69, 68, 66, 80, 90, 0, 10, 9]
+
+    N_RANDOM = 300
+    random.seed(42) 
+
+    exist = set(pk_int)
+    target_range = range(1, 10000)  
+    extra = []
+    if 300 not in exist:
+        extra.append(300)
+        exist.add(300)
+
+    # Completa hasta N_RANDOM aleatorios únicos
+    candidates = [x for x in target_range if x not in exist]
+    need = N_RANDOM - len(extra)
+    extra.extend(random.sample(candidates, need))
+
+    # Concatena: primero los originales, luego los nuevos (300 incluido)
+    all_pks = pk_int + extra
+
+    print("\n-- Insertando INT PKs (incluye 300 y 299 aleatorias más) --")
+    for pk in all_pks:
+        rec = {"k": 0, "rid": pk}  # DynamicRecord requiere todas las columnas del schema
         ok = bplus_int.add(rec)
         if not ok:
             print("  ! Falló insert:", rec)
+        print(f"\nINSERTANDO: {pk}")
+
 
     dump_index(bplus_int, title="B+ INT (M=4)")
+    # bplus_int.display_pretty()
+    # bplus_int.display_range(0, 10000)
 
-    bplus_int.display_pretty()
+    must_hits = [min(all_pks), 300, max(all_pks)] if all_pks else []
+    must_hits = [pk for pk in must_hits if pk in set(all_pks)]  # por si acaso
+    for pk in must_hits:
+        res = bplus_int.search(pk)
+        pks = _get_pks(res)
+        assert len(pks) == 1 and pks[0] == pk, f"search({pk}) falló: {pks}"
+        print(f"search({pk}) OK -> {pks}")
 
-    l = [0,10, 36, 47, 50, 60, 66, 67, 69, 11, 55, 70, 65, 72, 68, 111, 90, 75, 9, 52, 74, 45, 80, 71, 100, 114, 120]
+    # misses
+    miss_candidates = [-1, (max(all_pks) + 1) if all_pks else 999999]
+    for pk in miss_candidates:
+        res = bplus_int.search(pk)
+        pks = _get_pks(res)
+        assert pks == [], f"search({pk}) debería ser vacío: {pks}"
+        print(f"search({pk}) OK -> vacío")
 
-    for el in l:
-        print(f"Eliminando {el}:")
-        bplus_int.remove(el)
-        bplus_int.display_pretty()
-
-    bplus_int.display_pretty()
-
-    # # --------- Caso 2: STR(20) ----------
-    # idx_file_str = os.path.join(ROOT, "bplus_str.idx")
-    # rm_if_exists(idx_file_str)
-
-    # bplus_str = BTreeIndex(
-    #     column_name="name",
-    #     type="str",
-    #     filename=idx_file_str,
-    #     is_primary=False,
-    #     primary_key_column="rid",
-    #     M=4
-    # )
-
-    # keys_str = [
-    #     "ana",
-    #     "bernardo",
-    #     "zz-top",
-    #     "álvaro",
-    #     "xxxxxxxxxxxxxxxxxxxxLARGO",  # >20 bytes → se trunca
-    #     "maria",
-    #     "mario",
-    #     "alberto",
-    #     "alejandra",
-    #     "zeta",
-    # ]
-    # print("\n-- Insertando STR keys:", keys_str)
-    # for rec in records_from_keys(keys_str, pk_start=2000, col_name="name", pk_name="rid"):
-    #     ok = bplus_str.add(rec)
-    #     if not ok:
-    #         print("  ! Falló insert:", rec)
-
-    # dump_index(bplus_str, title="B+ STR(20) (M=4)")
-
-    # bplus_str.display_pretty()
-
-    # print("\nNota:")
-    # print("- Si tu implementación encadena hojas, revisa 'next_page' en páginas Leaf.")
-    # print("- Verás las strings largas truncadas por el codec de 20 bytes.")
-    # print("- Deben aparecer páginas Internal si los splits se hicieron bien.")
-
-
+    print("\nRANGE SEARCH\n")
+    print(bplus_int.rangeSearch(0, 100))
 if __name__ == "__main__":
     main()
+
