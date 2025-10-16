@@ -12,7 +12,6 @@ class SequentialFileIndex(BaseIndex):
         self.table_schema = table_schema
         self.max_auxiliary_records = max_auxiliary_records
         
-        # Inicializar bounds
         self._min_bound = None
         self._max_bound = None
         
@@ -20,7 +19,6 @@ class SequentialFileIndex(BaseIndex):
         self.record_size = struct.calcsize(temp_record)
         
         if filename:
-            # Add .dat extension if not present
             if not filename.endswith('.dat'):
                 filename = filename + '.dat'
             self.main_file = filename
@@ -49,14 +47,12 @@ class SequentialFileIndex(BaseIndex):
         
         file_size = os.path.getsize(self.main_file)
         count = file_size // self.record_size
-        
-        # Actualizar bounds al inicializar
+
         self._update_bounds()
         
         return count
         
     def _update_bounds(self):
-        """Actualiza los bounds basándose en los registros del archivo principal"""
         records = self._read_records_from_file(self.main_file)
         if records:
             values = [r[self.column_name] for r in records]
