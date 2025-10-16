@@ -1,39 +1,152 @@
-# Gramática en formato EBNF
+# Proyecto 1 - Organización e Indexación Eficiente de Archivos con Datos Multidimensionales
+
+---
+
+## 📑 Índice
+
+1. [Introducción](#1-introducción)
+2. [Técnicas de Indexación](#2-técnicas-de-indexación)
+3. [Parser SQL](#3-parser-sql)
+4. [Resultados Experimentales](#4-resultados-experimentales)
+5. [Pruebas de Uso](#5-pruebas-de-uso)
+
+---
+
+## 1. Introducción
+
+### Objetivo del Proyecto
+
+### Descripción de la Aplicación
+
+#### Combinación de Técnicas de Indexación
+
+---
+
+## 2. Técnicas de Indexación
+
+### 2.1 Sequential File
+
+#### Algoritmo de Inserción
+
+#### Algoritmo de Búsqueda
+
+#### Algoritmo de Búsqueda por Rango
+
+#### Algoritmo de Eliminación
+
+#### Análisis de Complejidad
+
+### 2.2 ISAM (Indexed Sequential Access Method)
+
+#### Algoritmo de Inserción
+
+#### Algoritmo de Búsqueda
+
+#### Algoritmo de Búsqueda
+
+#### Algoritmo de Búsqueda por Rango
+
+#### Algoritmo de Eliminación
+
+#### Análisis de Complejidad
+
+### 2.3 Extendible Hashing
+
+#### Algoritmo de Inserción
+
+#### Algoritmo de Búsqueda
+
+#### Limitación: No Soporta Búsqueda por Rango
+
+#### Algoritmo de Eliminación
+
+#### Análisis de Complejidad
+
+### 2.4 B+ Tree
+
+#### B+ Tree Clustered (Índice Primario)
+
+##### Algoritmo de Inserción
+
+##### Algoritmo de Búsqueda
+
+##### Algoritmo de Búsqueda por Rango
+
+##### Algoritmo de Eliminación
+
+##### Análisis de Complejidad
+
+#### B+ Tree Unclustered (Índice Secundario)
+
+##### Algoritmo de Inserción
+
+##### Algoritmo de Búsqueda
+
+##### Algoritmo de Búsqueda por Rango
+
+##### Algoritmo de Eliminación
+
+##### Análisis de Complejidad
+
+### 2.5 R-Tree (Datos Espaciales)
+
+#### Algoritmo de Inserción
+
+#### Algoritmo de Búsqueda Espacial
+
+#### Algoritmo de K-NN
+
+#### Análisis de Complejidad
+
+### Comparación Teórica de Técnicas
+
+| Técnica | Inserción | Búsqueda | Eliminación | Búsqueda por Rango |
+|---------|-----------|----------|-------------|-------------------|
+| Sequential File | | | | |
+| ISAM | | | | |
+| Extendible Hash | | | | N/A |
+| B+ Tree (Clustered) | | | | |
+| B+ Tree (Unclustered) | | | | |
+| R-Tree | | | | |
+
+---
+
+## 3. Parser SQL
+
+### Gramática SQL en formato EBNF
 
 ```ebnf
 statement = create_statement | select_statement | insert_statement | delete_statement ;
 
 create_statement = create_table_statement | create_table_from_file_statement ;
 
-create_table_statement = "CREATE" "TABLE" identifier "(" column_definition { "," column_definition } ")" ;
+create_table_statement = "CREATE" "TABLE" ID "(" column_definition { "," column_definition } ")" ";" ;
 
-create_table_from_file_statement = "CREATE" "TABLE" identifier "FROM" "FILE" string "USING" "INDEX" index_type "(" column_identifier ")" ;
+create_table_from_file_statement = "CREATE" "TABLE" ID "FROM" "FILE" STRING 
+                                   "USING" [ "PRIMARY" ] "INDEX" index_type "(" ID ")" 
+                                   { "," "INDEX" index_type "(" ID ")" } ";" ;
 
-column_definition = identifier data_type [ "KEY" ] [ "INDEX" index_type ] ;
+column_definition = ID data_type [ "KEY" ] [ "INDEX" index_type ] ;
 
-data_type = "INT"
-          | "FLOAT"
-          | "DATE"
-          | "VARCHAR" "[" integer "]"
-          | "ARRAY" "[" integer "]" "[" base_data_type "]" ;
+data_type = "INT" | "FLOAT" | "DATE" | "VARCHAR" "[" INTEGER "]" | "ARRAY" "[" INTEGER "]" "[" base_data_type "]" ;
 
 base_data_type = "INT" | "FLOAT" | "DATE" ;
 
 index_type = "SEQ" | "BTREE" | "HASH" | "ISAM" | "RTREE" ;
 
-select_statement = "SELECT" column_list "FROM" identifier [ where_clause ] [ order_clause ] [ limit_clause ] ;
+select_statement = "SELECT" column_list "FROM" ID [ where_clause ] [ order_clause ] [ limit_clause ] ";" ;
 
-column_list = "*" | identifier { "," identifier } ;
+column_list = "*" | ID { "," ID } ;
 
 where_clause = "WHERE" condition ;
 
-order_clause = "ORDER" "BY" identifier [ "ASC" | "DESC" ] ;
+order_clause = "ORDER" "BY" ID [ "ASC" | "DESC" ] ;
 
-limit_clause = "LIMIT" integer ;
+limit_clause = "LIMIT" INTEGER ;
 
-insert_statement = "INSERT" "INTO" identifier "VALUES" "(" value { "," value } ")" ;
+insert_statement = "INSERT" "INTO" ID "VALUES" "(" value { "," value } ")" ";" ;
 
-delete_statement = "DELETE" "FROM" identifier [ where_clause ] ;
+delete_statement = "DELETE" "FROM" ID [ where_clause ] ";" ;
 
 condition = or_condition ;
 
@@ -41,99 +154,172 @@ or_condition = and_condition { "OR" and_condition } ;
 
 and_condition = basic_condition { "AND" basic_condition } ;
 
-basic_condition = "(" condition ")"
-                | comparison_condition
-                | between_condition
-                | spatial_in_condition
-                | spatial_knn_condition ;
+basic_condition = "(" condition ")" | comparison_condition | between_condition | spatial_in_condition | spatial_knn_condition ;
 
-comparison_condition = identifier comparison_operator value ;
+comparison_condition = ID ( "=" | "!=" | "<" | "<=" | ">" | ">=" ) value ;
 
-comparison_operator = "=" | "!=" | "<" | "<=" | ">" | ">=" ;
+between_condition = ID "BETWEEN" value "AND" value ;
 
-between_condition = identifier "BETWEEN" value "AND" value ;
+spatial_in_condition = ID "IN" "(" point "," number ")" ;
 
-spatial_in_condition = identifier "IN" "(" point "," number ")" ;
+spatial_knn_condition = ID "KNN" "(" point "," INTEGER ")" ;
 
-spatial_knn_condition = identifier "KNN" "(" point "," integer ")" ;
+value = INTEGER | FLOAT | STRING | "(" number_or_string { "," number_or_string } ")" | "[" number_or_string { "," number_or_string } "]" ;
 
-value = number | string | array | point ;
+point = "(" number { "," number } ")" ;
 
-array = "(" number_or_string { "," number_or_string } ")"
-      | "[" number_or_string { "," number_or_string } "]" ;
+number_or_string = INTEGER | FLOAT | STRING ;
 
-point = "(" number "," number ")" ;
-
-number_or_string = number | string ;
-
-number = integer | float ;
-
-identifier = letter { letter | digit | "_" } ;
-
-column_identifier = identifier | string ;
-
-integer = digit { digit } ;
-
-float = digit { digit } "." digit { digit } ;
-
-string = '"' { character } '"' | "'" { character } "'" ;
-
-letter = "A" | "B" | ... | "Z" | "a" | "b" | ... | "z" ;
-
-digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-
-character = any_printable_character_except_quote ;
+number = INTEGER | FLOAT ;
 ```
 
-## Tipos de datos soportados
+## Ejemplos de Consultas
 
-- **INT**: Números enteros
-- **FLOAT**: Números de punto flotante
-- **VARCHAR[tamaño]**: Cadenas de longitud variable con tamaño máximo especificado
-- **DATE**: Fechas en formato YYYY-MM-DD
-- **ARRAY[dimensión][tipo_base]**: Arrays con dimensión y tipo base especificados
+```sql
+-- Crear tabla desde archivo CSV con índice primario y secundarios
+CREATE TABLE Restaurantes FROM FILE "restaurantes.csv" 
+USING PRIMARY INDEX ISAM(id), INDEX BTREE(nombre), INDEX RTREE(ubicacion);
 
-## Tipos de índices
+-- Búsqueda específica
+SELECT * FROM Restaurantes WHERE id = 100;
 
-- **SEQ**: Índice secuencial
-- **BTREE**: Índice B-Tree
-- **HASH**: Índice Hash
-- **ISAM**: Índice ISAM
-- **RTREE**: Índice R-Tree (para datos espaciales)
+-- Búsqueda por rango
+SELECT * FROM Restaurantes WHERE nombre BETWEEN "A" AND "M";
 
-## Operadores
+-- Inserción de registros
+INSERT INTO Restaurantes VALUES (1, "Pizza Hut", "2024-01-15", (12.5, -77.3));
 
-### Operadores de comparación
-- `=` (igual)
-- `!=` (no igual)
-- `<` (menor que)
-- `<=` (menor o igual que)
-- `>` (mayor que)
-- `>=` (mayor o igual que)
+-- Eliminación de registros
+DELETE FROM Restaurantes WHERE id = 50;
 
-### Operadores lógicos
-- `AND` (y lógico)
-- `OR` (o lógico)
+-- Búsqueda espacial: punto en radio
+SELECT * FROM Restaurantes WHERE ubicacion IN ((12.0, -77.0), 5.0);
 
-### Operadores especiales
-- `BETWEEN` (condición de rango)
-- `IN` (condición espacial punto-en-círculo)
-- `KNN` (k-vecinos más cercanos)
+-- Búsqueda espacial: K vecinos más cercanos
+SELECT * FROM Restaurantes WHERE ubicacion KNN ((12.0, -77.0), 10);
+```
 
-## Formatos de valores
 
-### Arrays
-- Formato con paréntesis: `(1, 2, 3)`
-- Formato con corchetes: `[1, 2, 3]`
+---
 
-### Puntos espaciales
-- Formato: `(x, y)` donde x e y son números
-- Ejemplo: `(10.5, 20.3)`
+## 4. Resultados Experimentales
 
-### Cadenas
-- Comillas simples: `'Hola Mundo'`
-- Comillas dobles: `"Hola Mundo"`
+### Configuración de Pruebas
 
-### Formato de fechas
-- Formato: `YYYY-MM-DD`
-- Ejemplo: `"2023-12-25"`
+#### Dataset Utilizado
+
+#### Métricas de Evaluación
+- Tiempo de ejecución en milisegundos
+
+### Resultados de Inserción
+
+#### Gráfico Comparativo
+
+#### Tabla de Resultados
+
+| Técnica | N=1K (ms) | N=10K (ms) | N=100K (ms) |
+|---------|-----------|------------|-------------|
+| Sequential File | | | |
+| ISAM | | | |
+| Extendible Hash | | | |
+| B+ Tree (Clustered) | | | |
+| B+ Tree (Unclustered) | | | |
+| R-Tree | | | |
+
+### Resultados de Búsqueda
+
+#### Gráfico Comparativo
+
+#### Tabla de Resultados
+
+| Técnica | N=1K (ms) | N=10K (ms) | N=100K (ms) |
+|---------|-----------|------------|-------------|
+| Sequential File | | | |
+| ISAM | | | |
+| Extendible Hash | | | |
+| B+ Tree (Clustered) | | | |
+| B+ Tree (Unclustered) | | | |
+| R-Tree | | | |
+
+### Resultados de Búsqueda por Rango
+
+#### Gráfico Comparativo
+
+#### Tabla de Resultados
+
+| Técnica | N=1K (ms) | N=10K (ms) | N=100K (ms) |
+|---------|-----------|------------|-------------|
+| Sequential File | | | |
+| ISAM | | | |
+| Extendible Hash | - | - | - |
+| B+ Tree (Clustered) | | | |
+| B+ Tree (Unclustered) | | | |
+| R-Tree | | | |
+
+### Resultados de Eliminación
+
+#### Gráfico Comparativo
+
+#### Tabla de Resultados
+
+| Técnica | N=1K (ms) | N=10K (ms) | N=100K (ms) |
+|---------|-----------|------------|-------------|
+| Sequential File | | | |
+| ISAM | | | |
+| Extendible Hash | | | |
+| B+ Tree (Clustered) | | | |
+| B+ Tree (Unclustered) | | | |
+| R-Tree | | | |
+
+### Análisis y Discusión
+
+---
+
+## 5. Pruebas de Uso
+
+### Interfaz Gráfica
+
+#### Funcionalidades del Frontend
+
+- Creación de tablas desde archivo CSV
+- Selección de índices (primario y secundarios)
+- Ejecución de consultas SQL
+- Visualización de resultados en tablas
+- Filtrado y búsqueda de datos
+- Operaciones CRUD (Create, Read, Update, Delete)
+- Búsquedas espaciales (IN, KNN)
+- Métricas de rendimiento en tiempo real
+
+
+---
+
+## 🎥 Video de Demostración
+
+[Enlace al video explicativo](#)
+
+---
+
+## 🚀 Despliegue con Docker
+
+```bash
+# Clonar el repositorio
+git clone https://github.com/joaquinsalinas06/Proyecto-1-BD2
+cd Proyecto-1-BD2
+
+# Levantar los servicios
+docker-compose up --build
+```
+
+**Acceso al sistema:**
+- 🖥️ **Frontend (UI)**: http://localhost:3000
+- 🔌 **API REST**: http://localhost:8000
+- 📖 **Documentación API**: http://localhost:8000/docs
+
+---
+
+## 👥 Integrantes
+
+- Joaquin Mauricio Salinas Salas
+- Isaac Emanuel Javier Simeon Sarmiento
+- Nayeli Fernanda Guzman Huayta
+- Renzo Josimar Felix Apointe
