@@ -1,13 +1,9 @@
 """
-
-
-
-ESTRUCTURA DE 2 NIVELES:
-------------------------
+ESTRUCTURA DE 2 NIVELES ( SOLO MEMORIA SECUNDARIA):
+---------------------------------------------------------------
 Nivel 2 (Índice Primario): Árbol de nodos intermedios con claves separadoras
 Nivel 1 (Índice Secundario): Nodos hoja que apuntan a páginas de datos
 Nivel 0 (Datos): Páginas con registros ordenados + overflow encadenado
-
 
 """
 
@@ -19,8 +15,7 @@ from .base_index import BaseIndex
 from ..record import DynamicRecord
 from ...parser.ast import ColumnDef
 
-
-
+BLOCK_FACTOR = 4  
 class Page:
     """
     Página de datos con encadenamiento.
@@ -186,6 +181,11 @@ class ISAMMetadata:
 
 
 class ISAMIndex(BaseIndex):
+    """
+  
+    Todas las operaciones leen y escriben directamente en disco.
+    No hay estructuras de datos en memoria RAM excepto metadatos mínimos.
+    """
     
     def __init__(self, column_name: str, table_schema: List[ColumnDef], 
                  filename: str = None, block_factor: int = 4,
@@ -262,7 +262,6 @@ class ISAMIndex(BaseIndex):
                 data = self._read_block(self.metadata_file, 0, os.path.getsize(self.metadata_file))
                 if data:
                     self.metadata = ISAMMetadata.unpack(data)
-                          f"{self.metadata.num_leaf_nodes} hojas")
                    
         except Exception as e:
             print(f"Iniciando nuevo índice ISAM: {e}")
@@ -272,7 +271,6 @@ class ISAMIndex(BaseIndex):
         data = self.metadata.pack()
         self._write_block(self.metadata_file, 0, data)
     
-    # ====================================================================
     def _write_node(self, node: Union[ISAMIntermediateNode, ISAMLeafNode], 
                     position: int = -1) -> int:
         """Escribe nodo en tree_file con tamaño variable"""
@@ -426,13 +424,12 @@ class ISAMIndex(BaseIndex):
         self.metadata.num_leaf_nodes = len(leaf_nodes_data)
         self._save_metadata()
         
-        print(f"Registros totales: {self.metadata.num_records}")
       
         
     def _build_two_level_tree(self, leaf_data: List[Dict]):
         """
         
-        
+        Construye árbol de exactamente 2 niveles 
         Todas las escrituras van directo a disco.
         """
         if not leaf_data:
@@ -653,7 +650,6 @@ class ISAMIndex(BaseIndex):
             for idx in range(start_idx, len(records_list)):
                 key_val = self._get_record_key(records_list[idx])
                 
-                # Verificar si pasamos el rango
                 if end_inclusive:
                     if key_val > end_key:
                         return results
@@ -723,7 +719,6 @@ class ISAMIndex(BaseIndex):
             overflow_pos = self._write_overflow(dynamic_record)
             
             if page.overflow_pointer == -1:
-                # Primera vez que se usa overflow
                 page.overflow_pointer = overflow_pos
                 self._write_page(page, leaf_node.data_page_pointer)
         
