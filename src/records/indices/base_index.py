@@ -50,15 +50,17 @@ class SpatialIndex(BaseIndex):
 
 def create_index(index_type: IndexType, column_name: str, filename: str = None,
                 is_primary: bool = False, primary_key_column: str = None, table_schema=None) -> BaseIndex:
+    print("column_name:", column_name, "filename:", filename, "is_primary:", is_primary, "primary_key_column:", primary_key_column)
+
 
     if index_type == IndexType.SEQ:
         from .sequential_file import SequentialFileIndex
         if not table_schema:
             raise ValueError("SequentialFileIndex requires table_schema")
         return SequentialFileIndex(column_name, table_schema, filename, is_primary, primary_key_column)
-
     elif index_type == IndexType.ISAM:
         from .isam_index import ISAMIndex
+
         return ISAMIndex(column_name, filename, is_primary, primary_key_column)
 
     elif index_type == IndexType.BTREE:
