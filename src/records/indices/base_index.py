@@ -61,7 +61,7 @@ def create_index(index_type: IndexType, column_name: str, filename: str = None,
     elif index_type == IndexType.ISAM:
         from .isam_index import ISAMIndex
 
-        return ISAMIndex(column_name, filename, is_primary, primary_key_column)
+        return ISAMIndex(column_name, table_schema, filename, is_primary=is_primary, primary_key_column=primary_key_column)
 
     elif index_type == IndexType.BTREE:
         from .btree_index import BTreeIndex
