@@ -46,7 +46,7 @@ class BTreeIndex(BaseIndex):
         elif dt == "VARCHAR":
             self.key_codec = FixedStrCodec(size=20)
         else:
-            raise ValueError(f"type not soported: {type}")
+            raise ValueError(f"type not supported: {type}")
         
         self.table_schema = table_schema
         temp_record = DynamicRecord._build_format(table_schema)
@@ -203,15 +203,45 @@ class BTreeIndex(BaseIndex):
 
         if root and root.count == 0:
             self.root_page = root.children[0]
-
-        if root.count == 0:
-            self.root_page == -1
+            if self.root_page == -1: 
+                return True
+            root = self._get_page_by_id(self.root_page)
+            if root.count == 0:
+                self.root_page = -1
 
         return True
 
     def getAllRecords(self) -> List[Dict[str, Any]]:
-        """Returns all records (stub - not implemented)"""
-        return []
+        """
+            Retorna todos los registros almacenados en el índice
+            en orden ascendente por clave. Recorre hojas usando next_page.
+        """
+        out: List[Dict[str, Any]] = []
+
+        pid = getattr(self, "root_page", None)
+        if pid is None or pid < 0 or self._page_count() == 0:
+            return out
+
+        while True:
+            node = self._get_page_by_id(pid)
+            if node.is_leaf:
+                break
+            if not node.children or node.children[0] is None or node.children[0] < 0:
+                return out
+            pid = node.children[0]
+
+        while pid != -1:
+            leaf = self._get_page_by_id(pid)
+            for j in range(leaf.count):
+                rec = leaf.records[j] if j < len(leaf.records) else None
+                if rec is None:
+                    continue
+                if getattr(rec, "deleted", False):
+                    continue
+                out.append({col.name: getattr(rec, col.name) for col in rec.schema})
+            pid = leaf.next_page if leaf.next_page is not None else -1
+
+        return out
 
     def clear_all(self) -> int:
         """Clears all records (stub - not implemented)"""
@@ -327,7 +357,7 @@ class BTreeIndex(BaseIndex):
             elif ( self.M % 2 == 0 ):
                 return self._split_par(node=node, key=key, id=id, record=record)
             else:
-                return self._split_impar(node, key)
+                return self._split_impar(node=node, key=key, id=id, record=record)
         else:
             split_result = self._insert(id=node.children[i], key=key, record=record)
             if split_result is not None:
@@ -337,7 +367,7 @@ class BTreeIndex(BaseIndex):
                 elif self.M % 2 == 0:
                     return self._split_par(node=node, key=split_result.key, id=id, record=record, right_tree=split_result.right_tree)
                 else:
-                    return self._split_impar(node, split_result.key, split_result.right_tree)
+                    return self._split_impar(node=node, key=split_result.key, id=id, record=record, right_tree=split_result.right_tree)
         
         return None
     
@@ -385,7 +415,14 @@ class BTreeIndex(BaseIndex):
         
         return ExtractionResult(key=middle, left_tree=-1, right_tree=new_id_right_node)
 
-    def _split_impar(self, node: Any, key: Any, right_tree: Optional[Any] = None) -> ExtractionResult[TK]:
+    def _split_impar(self, 
+                     node: Page, 
+                     key: Any, 
+                     id: int,
+                     record: DynamicRecord,
+                     right_tree: Optional[int] = None
+                     ) -> ExtractionResult:
+        
         m = (self.M - 1) // 2
         if key > node.keys[m]:
             right_node = self._generate_right_node(node, m + 1)
@@ -406,9 +443,8 @@ class BTreeIndex(BaseIndex):
                 node.count = (m + 2) if node.is_leaf else (m + 1)
                 right_node.children[0] = right_tree
 
-        if node.is_leaf:
-            right_node.next = node.next
-            node.next = right_node
+        right_node.next = node.next
+        node.next = right_node
 
         return ExtractionResult(middle, None, right_node)
 
@@ -454,7 +490,7 @@ class BTreeIndex(BaseIndex):
     def _relocate_right(self, 
                         node: Page, 
                         key: Any, 
-                        record: Optional[DynamicRecord],
+                        record: Optional[DynamicRecord] = None,
                         right_tree: int = -1,
                         ) -> None:
         
@@ -601,9 +637,9 @@ class BTreeIndex(BaseIndex):
                 extract_result = self._extract_first(nc_iplus)
                 
                 if (nc_i.is_leaf):
-                    self._relocate_right(nc_i, extract_result.key, node.refs[i], right_tree=extract_result.left_tree)
+                    self._relocate_right(nc_i, extract_result.key, node.records[i], right_tree=extract_result.left_tree)
                 else:
-                    self._relocate_right(nc_i, node.keys[i], node.refs[i], right_tree=extract_result.left_tree)
+                    self._relocate_right(nc_i, node.keys[i], node.records[i], right_tree=extract_result.left_tree)
                 node.keys[i] = extract_result.key
                 if not node.is_leaf and not nc_i.is_leaf:
                     for idx in range(len(nc_i.keys)):
