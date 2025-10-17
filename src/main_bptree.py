@@ -79,7 +79,8 @@ def main():
         if not ok:
             print("  ! Falló insert:", r)
 
-    dump_index(bplus, "B+ INT (M=4)")
+    bplus.display_pretty()
+    #dump_index(bplus, "B+ INT (M=4)")
 
     # SEARCH (clustered: sin duplicados)
     print("\n-- PRUEBA: search() --")
@@ -99,10 +100,12 @@ def main():
 
     # DELETE y revalidación básica
     print("\n-- PRUEBA: remove() --")
-    for k in [36, 74, 90]:
+    for k in [36, 74, 7, 10, 0, 9, 11]:
         bplus.remove(k)
         print(f"remove({k})")
         print("  search ->", _pks(bplus.search(k)))
+    
+    bplus.display_pretty()
 
     print("\n-- display_range(0, 130) --")
     bplus.display_range(0, 130)
