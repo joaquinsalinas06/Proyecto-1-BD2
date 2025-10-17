@@ -145,14 +145,57 @@ Esta implementación realiza eliminación física (reescritura), no eliminación
 ##### Análisis de Complejidad
 
 ### 2.5 R-Tree (Datos Espaciales)
+Estructura que guarda datos multidimensionales utilizando rectángulos mínimos (MBR) que engloban los objetos. Ideal para consultas espaciales como búsqueda por rango y K-NN.
 
+Algunas consideraciones a tener en cuenta son:
+- `leaf_capacity`: Número máximo de entradas por nodo hoja (por defecto 50)
+- `fill_factor`: Factor de llenado de nodos (0.7 = 70%)
+- `dimension`: Dimensionalidad del espacio (por defecto 2)
 #### Algoritmo de Inserción
+La inserción en R-Tree se realiza mediante la biblioteca `rtree`:
+
+**Proceso:**
+1. Se valida que el registro contenga la columna espacial y la clave primaria
+2. Se verifica que el punto tenga el número correcto de dimensiones
+3. Se extrae el punto del registro y se convierte a tupla
+4. Se crea un MBR (Minimum Bounding Rectangle) colapsado: `(x, y, x, y)` para un punto 2D
+5. Se inserta en el índice usando `rtree_index.insert(pk, mbr, obj=point)`
+6. Se incrementa el contador de registros
 
 #### Algoritmo de Búsqueda Espacial
+La búsqueda exacta de un punto utiliza búsqueda por intersección con tolerancia epsilon:
+
+**Proceso:**
+1. Se valida que la clave sea un punto con las dimensiones correctas
+2. Se crea un MBR pequeño alrededor del punto usando epsilon (1e-9)
+3. Se buscan intersecciones con `rtree_index.intersection(mbr, objects=True)`
+4. Se verifica cada candidato para confirmar coincidencia exacta comparando cada coordenada con tolerancia epsilon
+5. Se retornan los registros que coinciden exactamente
+
+Se usa una tolerancia pequeña (1e-9) para manejar imprecisiones de floats en las comparaciones.
 
 #### Algoritmo de K-NN
+La búsqueda KNN encuentra los k puntos más cercanos a un punto de consulta:
+
+**Proceso:**
+1. Se valida que el punto tenga las dimensiones correctas
+2. Se utiliza el método `rtree_index.nearest(point, k)` que implementa internamente un algoritmo best-first search
+3. La biblioteca rtree utiliza una cola de prioridad ordenada por distancia mínima
+4. Se retornan los k vecinos más cercanos con sus claves primarias, ordenados por proximidad
+
+Este enfoque tiene varias ventajas:
+- No requiere calcular distancia a todos los puntos (O(k log n) vs O(n) fuerza bruta)
+- No necesita conocer el radio de búsqueda de antemano
+- Aprovecha la localidad espacial del R-Tree para podar ramas lejanas
 
 #### Análisis de Complejidad
+| Operación | Mejor Caso | Caso Promedio | Peor Caso | Observaciones |
+|-----------|------------|---------------|-----------|---------------|
+| **Inserción** | O(log n) | O(log n) | O(n) | Logarítmico con buen balanceo. Degrada con división de nodos en cascada. |
+| **Búsqueda Exacta** | O(log n) | O(log n) | O(n) | Búsqueda por MBR más verificación exacta. Degrada con alto overlap. |
+| **Range Search** | O(log n + r) | O(log n + r) | O(n) | r = resultados. Eficiente para rangos pequeños. |
+| **KNN** | O(k log n) | O(k log n) | O(n) | Best-first search. Es mejor que fuerza bruta O(n log n). |
+| **Eliminación** | O(log n) | O(log n) | O(n) | Incluye posible rebalanceo. |
 
 ### Comparación Teórica de Técnicas
 
