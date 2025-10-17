@@ -39,7 +39,7 @@ class Page:
             next_page: i
             deleted: i (-2: no)
             children: BLOCK_FACTOR * i
-            keys: (BLOCK_FACTOR - 1) * key_codec.fmt   (dinámico, secondary atr)
+            keys: (BLOCK_FACTOR - 1) * key_codec.fmt   (dinámico, pk)
     """
     def __init__(self,
                  block_factor: int,
