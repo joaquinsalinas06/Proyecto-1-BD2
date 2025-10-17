@@ -148,7 +148,6 @@ class BTreeIndex(BaseIndex):
 
         return out
 
-
     def add(self, record: Dict[str, Any]) -> bool:
 
         key = record[self.column_name]
@@ -244,8 +243,42 @@ class BTreeIndex(BaseIndex):
         return out
 
     def clear_all(self) -> int:
-        """Clears all records (stub - not implemented)"""
-        return 0
+        """
+            Elimina todo el índice en disco y resetea el estado en memoria.
+            Devuelve la cantidad de registros no borrados que había (estimado).
+        """
+        import os
+        total = 0
+
+        if os.path.exists(self.filename) and os.path.getsize(self.filename) > 0:
+            ps = self.page_size
+            try:
+                with open(self.filename, "rb") as f:
+                    n_pages = os.path.getsize(self.filename) // ps
+                    for pid in range(n_pages):
+                        f.seek(pid * ps)
+                        data = f.read(ps)
+                        page = Page.unpack(
+                            data=data,
+                            key_codec=self.key_codec,
+                            BLOCK_FACTOR=self.M,
+                            RECORD_SIZE=self.record_size,
+                            table_schema=self.table_schema,
+                        )
+                        if page.is_leaf:
+                            for j in range(page.count):
+                                rec = page.records[j] if j < len(page.records) else None
+                                if rec is not None and not getattr(rec, "deleted", False):
+                                    total += 1
+            except Exception:
+                total = 0
+            try:
+                os.remove(self.filename)
+            except FileNotFoundError:
+                pass
+
+        self.root_page = -1
+        return total
     
     def display_pretty(self) -> None:
         
@@ -655,6 +688,7 @@ class BTreeIndex(BaseIndex):
             elif i > 0:
 
                 self._join(nc_iminus, node.keys[i - 1], nc_i)
+                nc_iminus.next_page = nc_i.next_page
                 deleted_node_id = node.children[i]
                 nc_i.deleted = -1
                 node.children[i] = -1
@@ -668,6 +702,7 @@ class BTreeIndex(BaseIndex):
             # join con derecho
             else:
                 self._join(nc_i, node.keys[i], nc_iplus)
+                nc_i.next_page = nc_iplus.next_page
                 nc_iplus.deleted = -1
                 node.children[i + 1] = -1
                 self._pop_element(node, i)
