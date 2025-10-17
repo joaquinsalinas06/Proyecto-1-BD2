@@ -1,12 +1,13 @@
 import os
 import csv
+import json
 from typing import List, Dict, Any, Optional
 from .parser.ast import (
     ColumnDef, IndexType, Value, Condition, DataType,
     CompCond, BetweenCond, SpatialInCond,
     SpatialKNNCond, LogicCond, Statement,
     CreateTableStmt, CreateTableFileStmt, SelectStmt,
-    InsertStmt, DeleteStmt
+    InsertStmt, DeleteStmt, IndexSpec
 )
 from .parser.sql_parser import SQLParser
 from src.records import DynamicRecord
@@ -56,11 +57,12 @@ class Table:
 class TableManager:
     def __init__(self):
         self.tables: Dict[str, Table] = {}
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.data_directory = os.path.join(project_root, "data")
-        os.makedirs(self.data_directory, exist_ok=True)
+        self.indices_directory = "indices"
+        os.makedirs(self.indices_directory, exist_ok=True)
+        self.metadata_file = os.path.join(self.indices_directory, "tables_metadata.json")
 
         self.parser = SQLParser()
+        self._load_table_metadata()
         
     #Se manda directamente el query a la funcion sql, que se encarga de parsearlo y ejecutar cada stmt
     def sql(self, query: str) -> List[Dict[str, Any]]:
@@ -85,8 +87,7 @@ class TableManager:
                 }
 
             elif isinstance(stmt, CreateTableFileStmt):
-                self.create_table_from_file(stmt.table_name, stmt.file_path,
-                                          stmt.index_type, stmt.key_column)
+                self.create_table_from_file(stmt.table_name, stmt.file_path, stmt.indexes)
                 return {
                     "type": "create_table_from_file",
                     "message": f"Tabla '{stmt.table_name}' creada desde archivo",
@@ -177,17 +178,31 @@ class TableManager:
                 )
                 table.indexes[col.name] = index
 
+        self._save_table_metadata()
     '''
     A partir de un archivo CSV, realizamos dos pasadas en streaming (sin cargar todo en memoria):
     1. Primera pasada: analizar tipos de datos y determinar tamaño óptimo para VARCHAR
     2. Segunda pasada: insertar registros en los índices
     '''
-    def create_table_from_file(self, table_name: str, file_path: str,
-                             index_type: IndexType, key_column: str):
+    def create_table_from_file(self, table_name: str, file_path: str, indexes: List['IndexSpec']):
         if table_name in self.tables:
             raise ValueError(f"La tabla '{table_name}' ya existe")
+
+        # Extraer la columna primaria y crear diccionario de índices por columna
+        primary_index_spec = None
+        index_specs_by_column = {}
+
+        for index_spec in indexes:
+            index_specs_by_column[index_spec.column_name] = index_spec
+            if index_spec.is_primary:
+                primary_index_spec = index_spec
+
+        if not primary_index_spec:
+            raise ValueError("Debe especificar un índice primario")
+
         column_stats = {}
 
+        # Primera pasada: Obtenemos estadísticas de las columnas
         with open(file_path, 'r', encoding='utf-8') as file:
             reader = csv.DictReader(file)
             headers = reader.fieldnames
@@ -205,12 +220,16 @@ class TableManager:
             for row in reader:
                 row_count += 1
                 for header in headers:
-                    value = row[header]
+                    value = row[header].strip()
                     stats = column_stats[header]
 
+                    # Detectar formato de ubicación "(lat,lon)"
+                    if value.startswith('(') and value.endswith(')') and ',' in value:
+                        stats['type'] = DataType.ARRAY
+                        continue
+
                     if not value.isdigit() and value:
-                        # Verificar si es FLOAT
-                        if '.' in value and value.replace('.', '').replace('-', '').isdigit():
+                        if value.lstrip('-').replace('.', '', 1).isdigit():
                             if stats['type'] == DataType.INT:
                                 stats['type'] = DataType.FLOAT
                         else:
@@ -222,10 +241,12 @@ class TableManager:
             if row_count == 0:
                 raise ValueError(f"Archivo '{file_path}' sin datos")
 
+        # Construimos el esquema con índices
         columns = []
         for header in headers:
-            is_key = (header == key_column)
-            col_index_type = index_type if is_key else None
+            is_key = (header == primary_index_spec.column_name)
+            index_spec = index_specs_by_column.get(header)
+            col_index_type = index_spec.index_type if index_spec else None
             stats = column_stats[header]
 
             size = None
@@ -240,11 +261,11 @@ class TableManager:
                 index_type=col_index_type
             )
             columns.append(column)
-        
-    
+
         table = Table(table_name, columns)
         self.tables[table_name] = table
 
+        # Crear índices
         for col in table.columns:
             if col.index_type:
                 index = create_index(
@@ -256,13 +277,34 @@ class TableManager:
                     table_schema=table.columns
                 )
                 table.indexes[col.name] = index
-                
+
+        # Segunda pasada: insertar registros en índices
         with open(file_path, 'r', encoding='utf-8') as file:
             reader = csv.DictReader(file)
             for row in reader:
+                parsed_row = {}
+                for col in table.columns:
+                    value_str = row[col.name].strip() if row[col.name] else ""
+
+                    if col.data_type == DataType.ARRAY:
+                        if value_str.startswith('(') and value_str.endswith(')'):
+                            coords_str = value_str[1:-1]
+                            coords = [float(x.strip()) for x in coords_str.split(',')]
+                            parsed_row[col.name] = tuple(coords)
+                        else:
+                            parsed_row[col.name] = value_str
+                    elif col.data_type == DataType.INT:
+                        parsed_row[col.name] = int(value_str) if value_str else 0
+                    elif col.data_type == DataType.FLOAT:
+                        parsed_row[col.name] = float(value_str) if value_str else 0.0
+                    else:
+                        parsed_row[col.name] = value_str
+
                 for _, index in table.indexes.items():
                     if index is not None:
-                        index.add(row)
+                        index.add(parsed_row)
+
+        self._save_table_metadata()
 
     '''
     Insertamos un registro en la tabla, verificando que la tabla exista
@@ -275,8 +317,6 @@ class TableManager:
         record_dict = {}
         for col, value in zip(table.columns, values):
             val = value.value
-            if hasattr(val, 'x') and hasattr(val, 'y'):
-                val = (val.x, val.y)
             record_dict[col.name] = val
 
         for _, index in table.indexes.items():
@@ -311,15 +351,24 @@ class TableManager:
         if limit:
             filtered_dicts = filtered_dicts[:limit]
 
-        if "*" in columns:
-            return filtered_dicts
+        select_all = "*" in columns # Verificar si se seleccionan todas las columnas
+        results = []
 
-        res = []
         for record in filtered_dicts:
-            selected = {col: record.get(col) for col in columns if col in record}
-            res.append(selected)
+            formatted_record = {}
 
-        return res
+            for key, value in record.items():
+                if not select_all and key not in columns: # Verificar si la columna está en la selección
+                    continue
+
+                if isinstance(value, (tuple, list)): # Formatear arrays como "(val1, val2)"
+                    formatted_record[key] = f"({', '.join(str(v) for v in value)})"
+                else:
+                    formatted_record[key] = value
+
+            results.append(formatted_record)
+
+        return results
 
     '''
     Si no existe un filtro de borrado, se eliminan todos los registros de la tabla
@@ -570,7 +619,7 @@ class TableManager:
             return []
 
         try:
-            pk_references = index.rangeSearch((point.x, point.y), radius)
+            pk_references = index.rangeSearch(point, radius)
             primary_index = table.get_primary_index()
 
             full_records = []
@@ -585,7 +634,7 @@ class TableManager:
             return []
 
     '''
-    Esta busqueda nuevamente es solo para los RTree, donde se le brinda un punto y un k, que es la cantidad de registros 
+    Esta busqueda nuevamente es solo para los RTree, donde se le brinda un punto y un k, que es la cantidad de registros
     más cercanos a ese punto que se desean obtener
     Nuevamente se obtienen las referencias y se busca en el indice primario para obtener los registros completos
     '''
@@ -599,7 +648,7 @@ class TableManager:
             return []
 
         try:
-            pk_references = index.knnSearch((point.x, point.y), k)
+            pk_references = index.knnSearch(point, k)
             primary_index = table.get_primary_index()
 
             full_records = []
@@ -636,3 +685,166 @@ class TableManager:
             return union_results
 
         return []
+
+    '''
+    Retorna metadatos de todas las tablas existentes: nombre, columnas, indices y cantidad de registros
+    '''
+    def get_all_tables_metadata(self) -> List[Dict[str, Any]]:
+        tables_metadata = []
+
+        for table_name, table in self.tables.items():
+            columns_info = []
+            indexed_columns = []
+
+            # Extraemos informacion de cada columna
+            for col in table.columns:
+                col_info = {
+                    "name": col.name,
+                    "type": self._format_column_type(col),
+                    "indexed": col.name in table.indexes,
+                    "indexType": col.index_type.value if col.index_type else None,
+                    "primaryKey": col.is_key
+                }
+                columns_info.append(col_info)
+
+                if col.name in table.indexes:
+                    indexed_columns.append(col.name)
+
+            # Obtener cantidad de registros del indice primario
+            row_count = 0
+            if table.key_column and table.key_column in table.indexes:
+                primary_index = table.indexes[table.key_column]
+                row_count = len(primary_index.getAllRecords())
+
+            tables_metadata.append({
+                "name": table_name,
+                "columns": columns_info,
+                "row_count": row_count,
+                "indexes": indexed_columns
+            })
+
+        return tables_metadata
+
+    '''
+    Retorna informacion detallada de una tabla especifica: esquema completo y muestra de los primeros registros
+    '''
+    def get_table_details(self, table_name: str, preview_limit: int = 100) -> Dict[str, Any]:
+        if table_name not in self.tables:
+            raise ValueError(f"La tabla '{table_name}' no existe")
+
+        table = self.tables[table_name]
+
+        # Construir informacion de cada columna
+        columns_info = []
+        for col in table.columns:
+            columns_info.append({
+                "name": col.name,
+                "type": self._format_column_type(col),
+                "indexed": col.name in table.indexes,
+                "indexType": col.index_type.value if col.index_type else None,
+                "primaryKey": col.is_key
+            })
+
+        # Obtener muestra de datos limitada
+        preview_data = []
+        if table.key_column and table.key_column in table.indexes:
+            primary_index = table.indexes[table.key_column]
+            all_records = primary_index.getAllRecords()
+            preview_data = all_records[:preview_limit]
+
+        return {
+            "name": table_name,
+            "description": f"Tabla '{table_name}' con {len(table.columns)} columnas",
+            "columns": columns_info,
+            "data": preview_data
+        }
+
+    '''
+    Formatea el tipo de dato de una columna como string para mostrar al usuario
+    Incluye el tamaño para VARCHAR y dimensiones para ARRAY
+    '''
+    def _format_column_type(self, col: ColumnDef) -> str:
+        if col.data_type == DataType.VARCHAR and col.size:
+            return f"VARCHAR[{col.size}]"
+        elif col.data_type == DataType.ARRAY and col.array_dimensions:
+            base_type = "FLOAT"
+            return f"ARRAY[{col.array_dimensions}][{base_type}]"
+        else:
+            return col.data_type.value
+
+    '''
+    Guarda los metadatos de todas las tablas en un archivo JSON
+    Permite reconstruir las tablas e indices al reiniciar el sistema
+    Se usa JSON para facilidad de lectura y escritura con el frontend
+    Y al contener solo metadatos, no es un archivo muy pesado
+    '''
+    def _save_table_metadata(self):
+        metadata = {}
+
+        # Por cada una de las tablas, guardamos su esquema y detalles de columnas
+        for table_name, table in self.tables.items():
+            columns_data = []
+            for col in table.columns:
+                col_data = {
+                    "name": col.name,
+                    "data_type": col.data_type.value,
+                    "size": col.size,
+                    "element_type": col.element_type.value if col.element_type else None,
+                    "is_key": col.is_key,
+                    "index_type": col.index_type.value if col.index_type else None,
+                    "array_dimensions": col.array_dimensions
+                }
+                columns_data.append(col_data)
+
+            metadata[table_name] = {
+                "name": table_name,
+                "columns": columns_data
+            }
+
+        with open(self.metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+    '''
+    Carga los metadatos desde el archivo JSON y reconstruye todas las tablas con sus indices
+    Se ejecuta al iniciar el TableManager para recuperar el estado previo del sistema
+    '''
+    def _load_table_metadata(self):
+        if not os.path.exists(self.metadata_file):
+            return
+
+        with open(self.metadata_file, 'r') as f:
+            metadata = json.load(f)
+
+        for table_name, table_data in metadata.items():
+            # Reconstruir columnas desde metadatos
+            columns = []
+            for col_data in table_data["columns"]:
+                col = ColumnDef(
+                    name=col_data["name"],
+                    data_type=DataType(col_data["data_type"]),
+                    size=col_data.get("size"),
+                    element_type=DataType(col_data["element_type"]) if col_data.get("element_type") else None,
+                    is_key=col_data.get("is_key", False),
+                    index_type=IndexType(col_data["index_type"]) if col_data.get("index_type") else None,
+                    array_dimensions=col_data.get("array_dimensions")
+                )
+                columns.append(col)
+
+            # Crear tabla y reconstruir sus indices desde archivos existentes
+            table = Table(table_name, columns)
+            primary_key_col = table.key_column
+
+            for col in columns:
+                if col.index_type:
+                    filename = f"indices/{table_name}_{col.name}.dat"
+                    index = create_index(
+                        index_type=col.index_type,
+                        column_name=col.name,
+                        filename=filename,
+                        is_primary=col.is_key,
+                        primary_key_column=primary_key_col if not col.is_key else None,
+                        table_schema=table.columns
+                    )
+                    table.indexes[col.name] = index
+
+            self.tables[table_name] = table

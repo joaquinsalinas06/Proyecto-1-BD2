@@ -50,11 +50,6 @@ class Value:
     type: DataType
 
 @dataclass
-class Point:
-    x: float
-    y: float
-
-@dataclass
 class CompCond:
     column: str
     operator: CompOp
@@ -71,14 +66,14 @@ class BetweenCond:
 @dataclass
 class SpatialInCond:
     column: str
-    point: Point
+    point: tuple  # N-dimensional coordinates
     radius: float
 
 
 @dataclass
 class SpatialKNNCond:
     column: str
-    point: Point
+    point: tuple  # N-dimensional coordinates
     k: int
 
 
@@ -105,11 +100,16 @@ class CreateTableStmt:
 
 
 @dataclass
+class IndexSpec:
+    index_type: IndexType
+    column_name: str
+    is_primary: bool = False
+
+@dataclass
 class CreateTableFileStmt:
     table_name: str
     file_path: str
-    index_type: IndexType
-    key_column: str
+    indexes: List[IndexSpec]  # Lista de especificaciones de índices
 
 
 @dataclass

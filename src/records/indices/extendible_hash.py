@@ -91,7 +91,7 @@ class ExtendibleHashIndex(BaseIndex):
         super().__init__(column_name, filename, is_primary, primary_key_column)
 
         self.bucket_capacity = int(bucket_capacity)
-        self.index_path = filename or f"{column_name}_hash.dat"
+        self.index_path = self.filename
 
         if not os.path.exists(self.index_path):
             self._init_new()

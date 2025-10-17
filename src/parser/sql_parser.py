@@ -77,31 +77,57 @@ class SQLParser:
         
         return CreateTableStmt(table_name, columns)
     
-    def _parse_create_from_file(self, table_name: str) -> CreateTableFileStmt: # CREATE TABLE name FROM FILE "path" USING INDEX type(column)
+    def _parse_create_from_file(self, table_name: str) -> CreateTableFileStmt:
+        # CREATE TABLE name FROM FILE "path" USING PRIMARY INDEX type(column), INDEX type(column), ...
         self._consume(TokenType.FROM, "Se esperaba 'FROM'")
         self._consume(TokenType.FILE, "Se esperaba 'FILE'")
-        
+
         file_path = self._consume(TokenType.STRING, "Se esperaba ruta del archivo").lexeme
         
         self._consume(TokenType.USING, "Se esperaba 'USING'")
-        self._consume(TokenType.INDEX, "Se esperaba 'INDEX'")
-        
+
+        # Parsear lista de índices
+        indexes = []
+
+        # Primer indice (debe ser PRIMARY)
+        if self._match(TokenType.PRIMARY):
+            self._consume(TokenType.INDEX, "Se esperaba 'INDEX' después de 'PRIMARY'")
+            index_spec = self._parse_index_specification(is_primary=True)
+            indexes.append(index_spec)
+        else:
+            raise ParseError("Se esperaba 'PRIMARY INDEX' como primer índice")
+
+        # Índices adicionales opcionales (secundarios)
+        while self._match(TokenType.COMMA):
+            self._consume(TokenType.INDEX, "Se esperaba 'INDEX'")
+            index_spec = self._parse_index_specification(is_primary=False)
+            indexes.append(index_spec)
+
+        return CreateTableFileStmt(table_name, file_path, indexes)
+
+    def _parse_index_specification(self, is_primary: bool) -> 'IndexSpec':
         index_type = self._parse_index_type()
-        if index_type not in [IndexType.SEQ, IndexType.ISAM, IndexType.BTREE]:
-            raise ParseError(f"Index type {index_type.value} cannot be used as primary key index. "
-                            f"Only SEQ, ISAM, and BTREE are allowed for primary key columns.")
+        if is_primary:
+            if index_type not in [IndexType.SEQ, IndexType.ISAM, IndexType.BTREE]:
+                raise ParseError(f"El tipo de índice {index_type.value} no puede usarse como índice de clave primaria. "
+                                 f"Solo SEQ, ISAM y BTREE están permitidos para columnas de clave primaria.")
+        else:
+            if index_type not in [IndexType.HASH, IndexType.RTREE, IndexType.BTREE]:
+                raise ParseError(f"El tipo de índice {index_type.value} no puede usarse como índice secundario. "
+                                 f"Solo HASH, RTREE y BTREE están permitidos para índices secundarios.")
 
         self._consume(TokenType.LPAREN, "Se esperaba '('")
 
         if self._check(TokenType.ID):
-            key_column = self._consume(TokenType.ID, "Se esperaba nombre de columna").lexeme
+            column_name = self._consume(TokenType.ID, "Se esperaba nombre de columna").lexeme
         elif self._check(TokenType.STRING):
-            key_column = self._consume(TokenType.STRING, "Se esperaba nombre de columna").lexeme
+            column_name = self._consume(TokenType.STRING, "Se esperaba nombre de columna").lexeme
         else:
             raise ParseError("Se esperaba nombre de columna (ID o STRING)")
+
         self._consume(TokenType.RPAREN, "Se esperaba ')'")
-        
-        return CreateTableFileStmt(table_name, file_path, index_type, key_column)
+
+        return IndexSpec(index_type, column_name, is_primary)
     
     def _parse_column_definition(self) -> ColumnDef: # column_definition -> name data_type [KEY] [INDEX index_type]
         name = self._consume(TokenType.ID, "Se esperaba nombre de columna").lexeme
@@ -386,12 +412,9 @@ class SQLParser:
 
             self._consume(TokenType.RPAREN, "Se esperaba ')'")
 
-            # Si son exactamente 2 números, tratarlo como punto espacial
-            if len(values) == 2 and all(isinstance(v, (int, float)) for v in values):
-                point = Point(float(values[0]), float(values[1]))
-                return Value(point, DataType.ARRAY)
-
-            return Value(values, DataType.ARRAY)
+            # All tuples are treated as arrays (including spatial points)
+            # Convert to tuple for consistency
+            return Value(tuple(values), DataType.ARRAY)
         
         elif self._check(TokenType.LBRACKET):
             self._consume(TokenType.LBRACKET, "Se esperaba '['")
@@ -405,20 +428,29 @@ class SQLParser:
         else:
             raise ParseError(f"Valor inesperado: {self._peek().lexeme}")
     
-    def _parse_point(self) -> Point:
+    def _parse_point(self) -> tuple:
         self._consume(TokenType.LPAREN, "Se esperaba '('")
-        
-        x_token = self._consume_number("Se esperaba coordenada X")
-        x = float(x_token.lexeme)
-        
-        self._consume(TokenType.COMMA, "Se esperaba ','")
-        
-        y_token = self._consume_number("Se esperaba coordenada Y")
-        y = float(y_token.lexeme)
-        
+
+        coordinates = []
+
+        # Parse first coordinate
+        coord_token = self._consume_number("Se esperaba coordenada")
+        coordinates.append(float(coord_token.lexeme))
+
+        # Parse remaining coordinates
+        while self._match(TokenType.COMMA):
+            # Check if next token is a number (coordinate) or closing paren
+            if self._check(TokenType.RPAREN):
+                # This comma was for the next parameter (radius or k), not another coordinate
+                self.current -= 1  # Put the comma back
+                break
+
+            coord_token = self._consume_number("Se esperaba coordenada")
+            coordinates.append(float(coord_token.lexeme))
+
         self._consume(TokenType.RPAREN, "Se esperaba ')'")
-        
-        return Point(x, y)
+
+        return tuple(coordinates)
     
     def _parse_number_or_string(self):
         if self._check(TokenType.INTEGER) or self._check(TokenType.FLOAT):

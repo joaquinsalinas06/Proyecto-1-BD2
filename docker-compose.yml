@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: bd2-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Volúmenes para datos e indices
+      - ./data:/app/data
+      - ./indices:/app/indices
+      - ./api/indices:/app/api/indices
+      - ./src:/app/src
+      - ./api:/app/api
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - bd2-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: bd2-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    networks:
+      - bd2-network
+    restart: unless-stopped
+
+networks:
+  bd2-network:
+    driver: bridge
+
+volumes:
+  # Volúmenes para persistir datos 
+  data:
+  indices:
+  api-indices:

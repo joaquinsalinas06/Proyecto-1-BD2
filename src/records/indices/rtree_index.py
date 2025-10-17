@@ -17,20 +17,16 @@ class RTreeIndex(SpatialIndex):
         self.dimensions = dimensions
         self.max_entries = max_entries
         self._record_count = 0
-        index_file = (
-            self.filename.replace(".dat", "")
-            if self.filename
-            else f"{column_name}_rtree"
-        )
-        self.index_file = index_file
+        base_filename = self.filename.replace('.dat', '')
+        self.index_file = base_filename
 
         directory = os.path.dirname(self.index_file)
         if directory and not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
 
-        if os.path.exists(f"{index_file}.dat") and os.path.exists(f"{index_file}.idx"):
+        if os.path.exists(f"{self.index_file}.dat") and os.path.exists(f"{self.index_file}.idx"):
             try:
-                self.rtree_index = index.Index(index_file)
+                self.rtree_index = index.Index(self.index_file)
                 self._record_count = len(list(self.rtree_index.intersection(self.rtree_index.bounds)))
             except Exception as e:
                 p = index.Property()
