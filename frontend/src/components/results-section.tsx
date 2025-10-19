@@ -1,15 +1,28 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 
 interface ResultsSectionProps {
   results: Record<string, any>[]
   isLoading?: boolean
   error?: string | null
+  metadata?: any
 }
 
-export function ResultsSection({ results, isLoading = false, error = null }: ResultsSectionProps) {
+export function ResultsSection({ results, isLoading = false, error = null, metadata = null }: ResultsSectionProps) {
   const [activeTab, setActiveTab] = useState<"results" | "answer">("results")
+
+  // Si es que hay metadata nueva, cambiar la pestaña activa según el tipo de consulta y resultados
+  useEffect(() => {
+    if (metadata) {
+      if (results && results.length > 0) {
+        setActiveTab("results")
+      }
+      else if (metadata.queryType !== "select") {
+        setActiveTab("answer")
+      }
+    }
+  }, [results, metadata])
 
   const columns = results && results.length > 0 ? Object.keys(results[0]) : []
 
@@ -107,19 +120,60 @@ export function ResultsSection({ results, isLoading = false, error = null }: Res
           )}
         </>
       ) : (
-        <div className="flex items-center justify-center h-32" style={{ color: "#6b7280" }}>
+        <div className="p-6">
           {isLoading ? (
-            <div className="flex items-center space-x-2">
-              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-[#1193d4]"></div>
-              <span>Executing query...</span>
+            <div className="flex items-center justify-center h-32" style={{ color: "#6b7280" }}>
+              <div className="flex items-center space-x-2">
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-[#1193d4]"></div>
+                <span>Ejecutando consulta...</span>
+              </div>
             </div>
           ) : error ? (
-            <div className="text-center" style={{ color: "#ef4444" }}>
-              <div className="font-medium">Query Error</div>
-              <div className="text-sm mt-1">{error}</div>
+
+            <div className="flex items-center justify-center h-32" style={{ color: "#ef4444" }}>
+              <div className="text-center">
+                <div className="font-medium">Error de Consulta</div>
+                <div className="text-sm mt-1">{error}</div>
+              </div>
+            </div>
+          ) : metadata ? (
+            <div className="space-y-4">
+              <div className="rounded-lg border p-4" style={{ borderColor: "#2a3b43", backgroundColor: "#1a2b33" }}>
+                <h3 className="text-lg font-semibold mb-3" style={{ color: "#e5e7eb" }}>Resumen de Consulta</h3>
+                <div className="space-y-2">
+                  <div className="flex justify-between">
+                    <span style={{ color: "#9ca3af" }}>Tipo de operación:</span>
+                    <span className="font-medium" style={{ color: "#e5e7eb" }}>{metadata.queryType?.toUpperCase()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span style={{ color: "#9ca3af" }}>Mensaje:</span>
+                    <span className="font-medium" style={{ color: "#e5e7eb" }}>{metadata.message}</span>
+                  </div>
+                  {metadata.affectedRows !== null && metadata.affectedRows !== undefined && (
+                    <div className="flex justify-between">
+                      <span style={{ color: "#9ca3af" }}>Filas afectadas:</span>
+                      <span className="font-medium" style={{ color: "#1193d4" }}>{metadata.affectedRows}</span>
+                    </div>
+                  )}
+                  {metadata.executionTime && (
+                    <div className="flex justify-between">
+                      <span style={{ color: "#9ca3af" }}>Tiempo de ejecución:</span>
+                      <span className="font-medium" style={{ color: "#1193d4" }}>{metadata.executionTime} ms</span>
+                    </div>
+                  )}
+                  {metadata.metadata?.table_name && (
+                    <div className="flex justify-between">
+                      <span style={{ color: "#9ca3af" }}>Tabla:</span>
+                      <span className="font-medium" style={{ color: "#e5e7eb" }}>{metadata.metadata.table_name}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           ) : (
-            <span>Consulta ejecutada exitosamente. {results.length} filas devueltas.</span>
+            <div className="flex items-center justify-center h-32" style={{ color: "#6b7280" }}>
+              <span>Ejecuta una consulta para ver los resultados</span>
+            </div>
           )}
         </div>
       )}

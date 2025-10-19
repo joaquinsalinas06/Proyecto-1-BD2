@@ -1,6 +1,7 @@
 "use client"
 
-import { Play, Copy, Menu, ChevronLeft, History, Database } from "lucide-react"
+import { useState } from "react"
+import { Play, Copy, Menu, ChevronLeft, History, Database, ChevronDown, ChevronUp } from "lucide-react"
 
 interface QueryHistoryItem {
   query: string
@@ -31,6 +32,13 @@ export function Sidebar({
   collapsed,
   onToggleCollapse,
 }: SidebarProps) {
+  const [showAllQueries, setShowAllQueries] = useState(false)
+  const [showAllTables, setShowAllTables] = useState(false)
+
+  const displayedQueries = showAllQueries ? queryHistory : queryHistory.slice(0, 10)
+  const displayedTables = showAllTables ? tables : tables.slice(0, 10)
+
+
   return (
     <aside
       className={`border-r flex flex-col transition-all duration-300 ${collapsed ? "w-16" : "w-80"}`}
@@ -135,7 +143,7 @@ export function Sidebar({
                   Historial
                 </h2>
                 <nav className="space-y-1">
-                  {queryHistory.map((item, index) => (
+                  {displayedQueries.map((item, index) => (
                     <div
                       key={index}
                       className="group rounded px-3 py-2 hover:bg-[#1193d4]/20 cursor-pointer"
@@ -161,6 +169,25 @@ export function Sidebar({
                     </div>
                   ))}
                 </nav>
+                {queryHistory.length > 10 && (
+                  <button
+                    onClick={() => setShowAllQueries(!showAllQueries)}
+                    className="mt-4 w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors hover:bg-[#1193d4]/20"
+                    style={{ color: "#1193d4" }}
+                  >
+                    {showAllQueries ? (
+                      <>
+                        <ChevronUp className="h-4 w-4" />
+                        Mostrar menos
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="h-4 w-4" />
+                        Mostrar {queryHistory.length - 10} más
+                      </>
+                    )}
+                  </button>
+                )}
               </>
               )}
             </div>
@@ -177,7 +204,7 @@ export function Sidebar({
                   Tablas
                 </h2>
                 <nav className="space-y-1">
-                  {tables.map((table) => (
+                  {displayedTables.map((table) => (
                     <button
                       key={table}
                       onClick={() => onTableClick(table)}
@@ -193,6 +220,25 @@ export function Sidebar({
                     </button>
                   ))}
                 </nav>
+                {tables.length > 10 && (
+                  <button
+                    onClick={() => setShowAllTables(!showAllTables)}
+                    className="mt-4 w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors hover:bg-[#1193d4]/20"
+                    style={{ color: "#1193d4" }}
+                  >
+                    {showAllTables ? (
+                      <>
+                        <ChevronUp className="h-4 w-4" />
+                        Mostrar menos
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="h-4 w-4" />
+                        Mostrar {tables.length - 10} más
+                      </>
+                    )}
+                  </button>
+                )}
               </>
               )}
             </div>
