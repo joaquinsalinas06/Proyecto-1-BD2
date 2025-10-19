@@ -36,17 +36,239 @@
 
 #### Análisis de Complejidad
 
-### 2.2 ISAM (Indexed Sequential Access Method)
+# 2.2 ISAM (Indexed Sequential Access Method)
 
-#### Algoritmo de Inserción
+## Introducción
 
-#### Algoritmo de Búsqueda
+El método **ISAM (Indexed Sequential Access Method)** es una técnica de indexación que combina un acceso **secuencial ordenado** con un **índice jerárquico**. Aunque originalmente fue diseñado como un método **estático**, en esta implementación se extiende para permitir un **crecimiento dinámico del índice** de 2 a 3 niveles según crece el volumen de datos.
 
-#### Algoritmo de Búsqueda
 
-#### Algoritmo de Búsqueda por Rango
+---
 
-#### Algoritmo de Eliminación
+## Características del ISAM Implementado
+
+*  Índice jerárquico **dinámico** (2 o 3 niveles)
+*  Soporta **overflow encadenado** para manejar inserciones
+*  Claves **ordenadas** para búsqueda eficiente
+*  **Persistencia en disco**, bajo consumo de memoria RAM
+*  Soporte para **búsquedas por rango**
+*  Operaciones eficientes: **O(log n)** en búsqueda
+
+---
+
+## Estructura General
+
+ISAM organiza los datos en dos archivos principales:
+
+*  **data_file** → almacena páginas de datos
+*  **tree_file** → almacena nodos del índice
+
+### Componentes del Índice
+
+| Nivel              | Descripción                            |
+| ------------------ | -------------------------------------- |
+| Nivel 0            | Páginas de datos (registros ordenados) |
+| Nivel 1            | Nodos hoja que apuntan a páginas       |
+| Nivel 2            | Nodos intermedios que agrupan hojas    |
+| Nivel 3 (opcional) | Raíz cuando los datos son grandes      |
+
+Representación del crecimiento dinámico:
+
+```
+2 niveles (pocos datos):        3 niveles (muchos datos):
+        ROOT                             ROOT
+         │                                │
+       Hojas                        Nodos intermedios
+         │                                │
+      Páginas                         Hojas → Páginas
+```
+
+
+## 2.2.1 Algoritmo de Construcción del Índice
+
+### Objetivo
+
+Organizar los registros iniciales y construir el índice jerárquico para permitir el acceso eficiente mediante búsqueda binaria en cada nivel del árbol.
+
+### Descripción General
+
+El proceso de construcción del índice ISAM se basa en ordenar los registros por su clave primaria y agruparlos en páginas de tamaño fijo. Posteriormente se crean los nodos hoja y nodos intermedios que almacenan únicamente claves guía y punteros hacia páginas o subíndices. En caso de que el volumen de datos supere la capacidad inicial, el índice admite la creación dinámica de un tercer nivel para mantener un acceso eficiente.
+
+### Supuestos de Construcción
+
+* Las claves están ordenadas de manera ascendente.
+* Cada página tiene tamaño fijo.
+* Si el número de páginas supera la capacidad de un nodo, se forma un nuevo nivel jerárquico.
+
+### Pseudocódigo
+
+Construcción del índice jerárquico inicial:
+
+```
+ConstruirIndice(registros):
+    ordenar(registros)
+    paginas = agruparEnPaginas(registros)
+    hojas = crearNodosHoja(paginas)
+    while longitud(hojas) > maxClavesPorNodo:
+        hojas = agruparEnNodosSuperiores(hojas)
+    raiz = crearNodoRaiz(hojas)
+    return raiz
+```
+
+---
+
+## 2.2.2 Algoritmo de Inserción
+
+La inserción en ISAM permite agregar nuevos registros manteniendo el orden lógico del archivo sin necesidad de reorganizar las páginas existentes. Para conservar la eficiencia del índice, se emplea una política de manejo de desbordamiento mediante páginas encadenadas.
+
+Pasos principales:
+
+1. Localizar la hoja adecuada mediante navegación en el índice.
+2. Leer la página de datos correspondiente.
+3. Insertar ordenadamente si la página tiene espacio disponible.
+4. Utilizar una página de desbordamiento si la página está completa.
+5. Actualizar los metadatos del índice.
+
+Pseudocódigo:
+
+```
+ISAM_Insert(key, record):
+    if not is_built:
+        build([record])
+        return True
+
+    current = root_pointer
+    while current is not Leaf:
+        node = read_node(current)
+        index = binary_search(node.values, key)
+        current = node.pointers[index]
+
+    leaf = read_node(current)
+    page = read_page(leaf.data_page_pointer)
+
+    if len(page.records) < BLOCK_FACTOR:
+        page.records.append(record)
+        page.records.sort()
+        write_page(page)
+    else:
+        overflow_pos = write_overflow(record)
+        if page.overflow_pointer == -1:
+            page.overflow_pointer = overflow_pos
+            write_page(page)
+
+    num_records++
+    save_metadata()
+```
+
+---
+
+## 2.2.3 Algoritmo de Búsqueda
+
+La búsqueda en ISAM se realiza mediante navegación jerárquica en el índice y búsqueda binaria en las páginas de datos. El algoritmo incluye la verificación de registros adicionales almacenados en páginas de desbordamiento.
+
+Pseudocódigo:
+
+```
+ISAM_Search(key):
+    leaf = find_leaf(key)
+    if leaf is NULL:
+        return []
+
+    page = read_page(leaf.data_page_pointer)
+    results = binary_search_all(page.records, key)
+
+    if page.overflow_pointer != -1:
+        overflow_records = read_overflow(page.overflow_pointer)
+        for r in overflow_records:
+            if r.key == key:
+                results.append(r)
+
+    return results
+```
+
+---
+
+## 2.2.4 Algoritmo de Búsqueda por Rango
+
+La búsqueda por rango permite recuperar todos los registros cuyas claves se encuentren entre dos valores determinados. Este algoritmo aprovecha el ordenamiento secuencial de las páginas de datos enlazadas.
+
+Pseudocódigo:
+
+```
+ISAM_RangeSearch(begin_key, end_key):
+    results = []
+    leaf = find_leaf(begin_key)
+
+    while leaf is not NULL:
+        page = read_page(leaf.data_page_pointer)
+
+        for record in page.records:
+            if begin_key <= record.key <= end_key:
+                results.append(record)
+            if record.key > end_key:
+                return results
+
+        if page.overflow_pointer != -1:
+            overflow_records = read_overflow(page.overflow_pointer)
+            for r in overflow_records:
+                if begin_key <= r.key <= end_key:
+                    results.append(r)
+
+        leaf = read_node(leaf.next_pointer)
+
+    return results
+```
+
+---
+
+## 2.2.5 Algoritmo de Eliminación
+
+La eliminación consiste en localizar y remover todos los registros que coincidan con una clave dada, tanto en la página principal como en su cadena de overflow.
+
+Pseudocódigo:
+
+```
+ISAM_Delete(key):
+    leaf = find_leaf(key)
+    if leaf is NULL:
+        return False
+
+    page = read_page(leaf.data_page_pointer)
+    page.records = [r for r in page.records if r.key != key]
+
+    if page.overflow_pointer != -1:
+        overflow = read_overflow(page.overflow_pointer)
+        filtered = [r for r in overflow if r.key != key]
+        rebuild_overflow(filtered)
+
+    write_page(page)
+    num_records--
+    save_metadata()
+    return True
+```
+
+---
+
+## 2.2.6 Análisis de Complejidad
+
+El rendimiento del método ISAM se resume en términos de tiempo de ejecución y espacio en disco empleado.
+
+| Operación          | Complejidad Temporal |
+| ------------------ | -------------------- |
+| Construcción       | O(n log n)           |
+| Inserción          | O(log n)             |
+| Búsqueda           | O(log n + k)         |
+| Búsqueda por rango | O(log n + r + k)     |
+| Eliminación        | O(log n + k)         |
+
+Donde:
+
+* n = número total de registros
+* r = número de resultados devueltos
+* k = registros almacenados en páginas de desbordamiento
+
+---
+
 
 #### Análisis de Complejidad
 

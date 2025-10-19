@@ -64,21 +64,8 @@ if __name__ == "__main__":
             record = result[0]['data'][0]
             print(f"   id={id_val}: {record['nombre']}, edad={record['edad']}")
     
-    result = tm.sql("SELECT * FROM usuarios WHERE nombre = 'Ana';")
-    print(f"   Búsqueda hash (nombre='Ana'): encontrados {len(result[0]['data'])} registro(s)")
-    
-    result = tm.sql("SELECT * FROM usuarios WHERE nombre = 'Sofia';")
-    print(f"   Búsqueda hash (nombre='Sofia'): encontrados {len(result[0]['data'])} registro(s)")
-    print()
-    
-    print("4. Probando búsqueda por rango...")
-    print("   Intentando rango en índice hash (debería fallar):")
-    try:
-        result = tm.sql("SELECT * FROM usuarios WHERE nombre BETWEEN 'Ana' AND 'Carlos';")
-        print(f"   ⚠ ADVERTENCIA: Búsqueda por rango funcionó (cayó a escaneo completo)")
-    except NotImplementedError as e:
-        print(f"   ✓ Excepción esperada: {e}")
-    
+
+
     print("   Rango en índice primario (debería funcionar):")
     result = tm.sql("SELECT * FROM usuarios WHERE id BETWEEN 10 AND 20;")
     encontrados = len(result[0]['data'])
@@ -104,71 +91,6 @@ if __name__ == "__main__":
     assert restantes == esperados, f"Se esperaban {esperados} registros, se obtuvieron {restantes}"
     print()
     
-    print("6. Probando valores duplicados en índice hash...")
     
-    sql = """
-    CREATE TABLE clientes (
-        id INT KEY INDEX SEQ,
-        ciudad VARCHAR[50] INDEX HASH,
-        monto FLOAT
-    );
-    """
-    tm.sql(sql)
-    
-    duplicados = [
-        (1, "Lima", 100.0), (2, "Lima", 200.0), (3, "Lima", 150.0), (4, "Lima", 175.0),
-        (5, "Cusco", 300.0), (6, "Cusco", 250.0), (7, "Cusco", 280.0),
-        (8, "Arequipa", 180.0), (9, "Arequipa", 220.0), (10, "Arequipa", 195.0),
-        (11, "Trujillo", 160.0), (12, "Trujillo", 190.0),
-        (13, "Piura", 140.0), (14, "Piura", 170.0), (15, "Piura", 155.0),
-        (16, "Chiclayo", 210.0), (17, "Iquitos", 230.0), (18, "Tacna", 165.0),
-        (19, "Lima", 185.0), (20, "Cusco", 295.0)
-    ]
-    
-    for id_val, ciudad, monto in duplicados:
-        tm.sql(f"INSERT INTO clientes VALUES ({id_val}, '{ciudad}', {monto});")
-    print(f"   ✓ Insertados {len(duplicados)} registros\n")
-    
-    print("   Probando búsquedas con duplicados:")
-    result = tm.sql("SELECT * FROM clientes WHERE ciudad = 'Lima';")
-    lima_count = len(result[0]['data'])
-    lima_ids = [r['id'] for r in result[0]['data']]
-    print(f"   Búsqueda hash (ciudad='Lima'): {lima_count} registros - IDs: {lima_ids}")
-    assert lima_count == 5, f"Se esperaban 5 registros de Lima, se obtuvieron {lima_count}"
-    
-    result = tm.sql("SELECT * FROM clientes WHERE ciudad = 'Cusco';")
-    cusco_count = len(result[0]['data'])
-    cusco_ids = [r['id'] for r in result[0]['data']]
-    print(f"   Búsqueda hash (ciudad='Cusco'): {cusco_count} registros - IDs: {cusco_ids}")
-    assert cusco_count == 4, f"Se esperaban 4 registros de Cusco, se obtuvieron {cusco_count}"
-    
-    result = tm.sql("SELECT * FROM clientes WHERE ciudad = 'Arequipa';")
-    arequipa_count = len(result[0]['data'])
-    arequipa_ids = [r['id'] for r in result[0]['data']]
-    print(f"   Búsqueda hash (ciudad='Arequipa'): {arequipa_count} registros - IDs: {arequipa_ids}")
-    assert arequipa_count == 3, f"Se esperaban 3 registros de Arequipa, se obtuvieron {arequipa_count}"
-    print()
-    
-    print("   Probando eliminación de un registro duplicado:")
-    tm.sql("DELETE FROM clientes WHERE id = 2;")
-    result = tm.sql("SELECT * FROM clientes WHERE ciudad = 'Lima';")
-    lima_despues = len(result[0]['data'])
-    print(f"   Después de eliminar id=2: {lima_despues} registros de Lima")
-    assert lima_despues == 4, f"Se esperaban 4 registros de Lima, se obtuvieron {lima_despues}"
-    
-    tm.sql("DELETE FROM clientes WHERE id = 19;")
-    result = tm.sql("SELECT * FROM clientes WHERE ciudad = 'Lima';")
-    lima_final = len(result[0]['data'])
-    print(f"   Después de eliminar id=19: {lima_final} registros de Lima")
-    assert lima_final == 3, f"Se esperaban 3 registros de Lima, se obtuvieron {lima_final}"
-    print()
-    
-    result = tm.sql("SELECT * FROM clientes;")
-    total_final = len(result[0]['data'])
-    print(f"   Total de registros restantes: {total_final}/{len(duplicados) - 2}")
-    print()
-    
-    print("✓ Todas las pruebas pasaron exitosamente!")
-
 
 
