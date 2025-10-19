@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Tuple
-#from ...parser.ast import IndexType
-from parser.ast import IndexType 
+from src.parser.ast import IndexType
 
 
 
@@ -49,9 +48,7 @@ class SpatialIndex(BaseIndex):
 
 
 def create_index(index_type: IndexType, column_name: str, filename: str = None,
-                is_primary: bool = False, primary_key_column: str = None, table_schema=None) -> BaseIndex:
-    print("column_name:", column_name, "filename:", filename, "is_primary:", is_primary, "primary_key_column:", primary_key_column)
-
+                is_primary: bool = False, primary_key_column: str = None, table_schema=None, expected_size: int = None) -> BaseIndex:
 
     if index_type == IndexType.SEQ:
         from .sequential_file import SequentialFileIndex
@@ -60,27 +57,32 @@ def create_index(index_type: IndexType, column_name: str, filename: str = None,
         return SequentialFileIndex(column_name, table_schema, filename, is_primary, primary_key_column)
     elif index_type == IndexType.ISAM:
         from .isam_index import ISAMIndex
-
-        return ISAMIndex(column_name, filename, is_primary, primary_key_column)
+        if not table_schema:
+            raise ValueError("ISAMIndex requires table_schema")
+        return ISAMIndex(column_name, table_schema, filename, is_primary=is_primary, primary_key_column=primary_key_column)
 
     elif index_type == IndexType.BTREE:
-        from .btree_index import BTreeIndex
-        return BTreeIndex(column_name, filename, is_primary, primary_key_column)
+        from .bptree_clustered_index import BTreeIndex
+        if not table_schema:
+            raise ValueError("BTreeIndex (clustered) requires table_schema")
+        if not is_primary:
+            raise ValueError("BTREE index type is only supported as PRIMARY index (clustered)")
+        return BTreeIndex(column_name, table_schema, filename, is_primary, primary_key_column)
 
     elif index_type == IndexType.HASH:
         from .extendible_hash import ExtendibleHashIndex
-        return ExtendibleHashIndex(column_name, filename, is_primary, primary_key_column)
+        return ExtendibleHashIndex(column_name, filename, is_primary, primary_key_column, expected_size=expected_size)
 
     elif index_type == IndexType.RTREE:
         from .rtree_index import RTreeIndex
-        #Esto es por si no definieron dimensiones en el schema, por defecto 2
-        dimensiones = 2
+        # Extract dimensions from schema if available, default to 2
+        dimensions = 2
         if table_schema:
             for col in table_schema:
                 if col.name == column_name and col.array_dimensions:
-                    dimensiones = col.array_dimensions
+                    dimensions = col.array_dimensions
                     break
-        return RTreeIndex(column_name, filename, is_primary, primary_key_column, dimensions=dimensiones)
+        return RTreeIndex(column_name, filename, is_primary, primary_key_column, dimensions=dimensions)
 
     else:
         raise ValueError(f"Tipo de índice no soportado: {index_type}")

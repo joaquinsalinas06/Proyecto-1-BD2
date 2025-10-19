@@ -118,10 +118,17 @@ class RTreeIndex(SpatialIndex):
         self._record_count += 1
         return True
 
-    def remove(self, key: Any) -> bool:
+    def remove(self, key: Any, primary_key: Any = None) -> bool:
         if not isinstance(key, (list, tuple)) or len(key) != self.dimensions:
             return False
         mbr = tuple(key) + tuple(key)
+        if primary_key is not None:
+            try:
+                self.rtree_index.delete(int(primary_key), mbr)
+                self._record_count -= 1
+                return True
+            except Exception:
+                return False
         removed = False
         for item in self.rtree_index.intersection(mbr, objects=True):
             stored_point = item.object

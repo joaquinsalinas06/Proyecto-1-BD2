@@ -1,25 +1,31 @@
 """
-
-
-
 ESTRUCTURA DE 2 NIVELES:
 ------------------------
 Nivel 2 (Índice Primario): Árbol de nodos intermedios con claves separadoras
 Nivel 1 (Índice Secundario): Nodos hoja que apuntan a páginas de datos
 Nivel 0 (Datos): Páginas con registros ordenados + overflow encadenado
-
-
 """
 
 from typing import List, Dict, Any, Optional, Union
 import os
 import struct
 import pickle
+import math
 from .base_index import BaseIndex
 from ..record import DynamicRecord
 from ...parser.ast import ColumnDef
 
-BLOCK_FACTOR = 4  # Registros por página
+BLOCK_FACTOR = 64
+
+def calcular_BlockFactor(expected_records: Optional[int] = None) -> int:
+    if expected_records is None:
+        return 64
+    
+    optimal = int(math.sqrt(expected_records))
+
+    power_of_2 = 2 ** round(math.log2(optimal))
+
+    return max(32, min(512, power_of_2))
 
 
 class Page:
@@ -190,10 +196,13 @@ class ISAMIndex(BaseIndex):
  
     
     def __init__(self, column_name: str, table_schema: List[ColumnDef], 
-                 filename: str = None, block_factor: int = 4,
-                 is_primary: bool = False, primary_key_column: str = None):
+                 filename: str = None, block_factor: int = None,
+                 is_primary: bool = False, primary_key_column: str = None,
+                 expected_records: Optional[int] = None):
         super().__init__(column_name, filename, is_primary, primary_key_column)
         self.table_schema = table_schema
+        if block_factor is None:
+            block_factor = calcular_BlockFactor(expected_records) 
         self.block_factor = block_factor
         self.column_name = column_name
         
@@ -261,8 +270,7 @@ class ISAMIndex(BaseIndex):
                 f.seek(position)
                 data = f.read(size)
                 return data if len(data) == size else None
-        except Exception as e:
-            print(f"Error leyendo bloque en {position}: {e}")
+        except Exception:
             return None
     
     def _load_existing_index(self):
@@ -272,11 +280,8 @@ class ISAMIndex(BaseIndex):
                 data = self._read_block(self.metadata_file, 0, os.path.getsize(self.metadata_file))
                 if data:
                     self.metadata = ISAMMetadata.unpack(data)
-                    print(f"✓ ISAM cargado: {self.metadata.num_records} registros, "
-                          f"{self.metadata.num_levels} niveles, "
-                          f"{self.metadata.num_leaf_nodes} hojas")
-        except Exception as e:
-            print(f"Iniciando nuevo índice ISAM: {e}")
+        except Exception:
+            pass
     
     def _save_metadata(self):
         """Persiste metadatos en disco"""
@@ -339,8 +344,7 @@ class ISAMIndex(BaseIndex):
             self.node_cache[position] = node
             return node
             
-        except Exception as e:
-            print(f"Error leyendo nodo en {position}: {e}")
+        except Exception:
             return None
     
     def _write_page(self, page: Page, position: int = -1) -> int:
@@ -371,8 +375,7 @@ class ISAMIndex(BaseIndex):
         
         try:
             return Page.unpack(data, self.table_schema, self.record_size)
-        except Exception as e:
-            print(f"Error desempaquetando página: {e}")
+        except Exception:
             return None
     
     # ====================================================================
@@ -414,11 +417,6 @@ class ISAMIndex(BaseIndex):
         if not records:
             return
         
-        print(f"\n{'='*60}")
-        print(f"CONSTRUYENDO ÍNDICE ISAM DE 2 NIVELES")
-        print(f"{'='*60}")
-        print(f"Registros a indexar: {len(records)}")
-        
         # 1. Convertir y ordenar registros
         dynamic_records = [self._dict_to_record(rec) for rec in records]
         dynamic_records.sort(key=lambda r: self._get_record_key(r))
@@ -427,7 +425,6 @@ class ISAMIndex(BaseIndex):
         leaf_nodes_data = []
         prev_page_pos = -1
         
-        print(f"Creando páginas de datos (BLOCK_FACTOR={self.block_factor})...")
         for i in range(0, len(dynamic_records), self.block_factor):
             page_records = dynamic_records[i:i + self.block_factor]
             page = Page(records=page_records, record_size=self.record_size)
@@ -446,8 +443,6 @@ class ISAMIndex(BaseIndex):
             })
             prev_page_pos = page_pos
         
-        print(f"✓ {len(leaf_nodes_data)} páginas creadas")
-        
         # 3. Construir árbol de 2 niveles
         self._build_two_level_tree(leaf_nodes_data)
         
@@ -456,15 +451,10 @@ class ISAMIndex(BaseIndex):
         self.metadata.is_built = True
         self.metadata.num_leaf_nodes = len(leaf_nodes_data)
         self._save_metadata()
-        
-        print(f"\n{'='*60}")
-        print(f"✓ ÍNDICE ISAM CONSTRUIDO EXITOSAMENTE")
-        print(f"{'='*60}")
-        print(f"Niveles del árbol: {self.metadata.num_levels}")
-        print(f"Nodos hoja (nivel 1): {self.metadata.num_leaf_nodes}")
-        print(f"Páginas de datos (nivel 0): {self.metadata.num_pages}")
-        print(f"Registros totales: {self.metadata.num_records}")
-        print(f"{'='*60}\n")
+    
+    def bulk_load(self, records: List[Dict[str, Any]]) -> bool:
+        self.build(records)
+        return True
     
     def _build_two_level_tree(self, leaf_data: List[Dict]):
         """
@@ -478,10 +468,7 @@ class ISAMIndex(BaseIndex):
         if not leaf_data:
             return
         
-        print(f"\nConstruyendo estructura de 2 niveles...")
-        
         # NIVEL 1: Crear nodos hoja
-        print(f"Nivel 1: Creando {len(leaf_data)} nodos hoja...")
         leaf_positions = []
         
         for i, data in enumerate(leaf_data):
@@ -499,10 +486,7 @@ class ISAMIndex(BaseIndex):
             leaf.next_pointer = leaf_positions[i + 1][0]
             self._write_node(leaf, leaf_positions[i][0])
         
-        print(f"✓ {len(leaf_positions)} nodos hoja creados y enlazados")
-        
         # NIVEL 2: Crear nodos intermedios
-        print(f"Nivel 2: Creando nodos intermedios...")
         intermediate_nodes = []
         
         for i in range(0, len(leaf_positions), self.block_factor):
@@ -521,8 +505,6 @@ class ISAMIndex(BaseIndex):
             pos = self._write_node(intermediate)
             intermediate_nodes.append((pos, group[0][1]))
         
-        print(f"✓ {len(intermediate_nodes)} nodos intermedios creados")
-        
         # Establecer raíz
         if len(intermediate_nodes) == 1:
             # Caso simple: un solo nodo intermedio es la raíz
@@ -530,7 +512,6 @@ class ISAMIndex(BaseIndex):
             self.metadata.num_levels = 2
         else:
             # Múltiples nodos intermedios: crear raíz superior
-            print(f"Creando raíz superior para {len(intermediate_nodes)} nodos...")
             root = ISAMIntermediateNode(
                 values=[item[1] for item in intermediate_nodes[1:]],
                 pointers=[item[0] for item in intermediate_nodes],
@@ -538,8 +519,6 @@ class ISAMIndex(BaseIndex):
             )
             self.metadata.root_pointer = self._write_node(root)
             self.metadata.num_levels = 3
-        
-        print(f"✓ Raíz establecida en posición {self.metadata.root_pointer}")
     
     # ====================================================================
     #                  BÚSQUEDA (CON BÚSQUEDA BINARIA)
@@ -828,8 +807,8 @@ class ISAMIndex(BaseIndex):
                             records.append(record)
                     except:
                         pass
-        except Exception as e:
-            print(f"Error leyendo overflow en {position}: {e}")
+        except Exception:
+            pass
         
         return records
     
@@ -990,7 +969,6 @@ class ISAMIndex(BaseIndex):
         # Limpiar cache
         self.node_cache.clear()
         
-        print(f"✓ Índice limpiado: {count} registros eliminados")
         return count
     
     # ====================================================================
@@ -1001,14 +979,6 @@ class ISAMIndex(BaseIndex):
         """Cierra el índice y persiste estado final"""
         self._save_metadata()
         self.node_cache.clear()
-        print(f"\n{'='*60}")
-        print(f"✓ ÍNDICE ISAM CERRADO")
-        print(f"{'='*60}")
-        print(f"Registros guardados: {self.metadata.num_records}")
-        print(f"Niveles del árbol: {self.metadata.num_levels}")
-        print(f"Nodos hoja: {self.metadata.num_leaf_nodes}")
-        print(f"Páginas de datos: {self.metadata.num_pages}")
-        print(f"{'='*60}\n")
     
     def get_statistics(self) -> Dict[str, Any]:
         """

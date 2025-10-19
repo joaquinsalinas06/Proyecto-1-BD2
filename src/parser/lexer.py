@@ -68,7 +68,13 @@ class Lexer:
 
         elif char == '"' or char == "'":
             self._string(char)
-        
+
+        elif char == '-':
+            if self._peek().isdigit():
+                self._number()
+            else:
+                self._add_token(TokenType.MINUS)
+                        
         elif char.isdigit():
             self._number()
         
@@ -82,19 +88,33 @@ class Lexer:
     def _string(self, quote_char: str):
         start_line = self.line
         
-        while self._peek() != quote_char and not self._is_at_end():
-            if self._peek() == '\n':
+        while not self._is_at_end():
+            # Check if we hit a quote
+            if self._peek() == quote_char:
+                # Look ahead to see if it's an escaped quote ('')
+                if self._peek_next() == quote_char:
+                    # It's an escaped quote, consume both and continue
+                    self._advance()  # consume first '
+                    self._advance()  # consume second '
+                else:
+                    # It's the closing quote, break
+                    break
+            elif self._peek() == '\n':
                 self.line += 1
                 self.column = 1
-            self._advance()
+                self._advance()
+            else:
+                self._advance()
         
         if self._is_at_end():
             raise LexerError(f"String sin cerrar iniciado en línea {start_line}")
 
-        self._advance()
+        self._advance()  # consume closing quote
         
         # Obtener el valor del string (sin las comillas)
         value = self.source[self.start + 1:self.current - 1]
+        # Unescape doubled quotes: '' -> '
+        value = value.replace(quote_char + quote_char, quote_char)
         self._add_token(TokenType.STRING, value)
     
     def _number(self):

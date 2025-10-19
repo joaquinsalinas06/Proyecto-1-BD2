@@ -1,8 +1,23 @@
 import os
 import struct
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base_index import BaseIndex
+
+
+def calcular_Capacidad(expected_records: Optional[int] = None) -> int:
+    if expected_records is None:
+        return 64
+
+    optimal = int(math.sqrt(expected_records) / 2)
+    
+    if optimal < 2:
+        power_of_2 = 16
+    else:
+        power_of_2 = 2 ** round(math.log2(optimal))
+    
+    return max(16, min(512, power_of_2))
 
 HEADER_FMT = 'IIQ'
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
@@ -85,19 +100,22 @@ class ExtendibleHashIndex(BaseIndex):
         filename: Optional[str] = None,
         is_primary: bool = False,
         primary_key_column: Optional[str] = None,
-        bucket_capacity: int = 4,
+        bucket_capacity: int = None,
+        expected_size: Optional[int] = None
     ):
-       
         super().__init__(column_name, filename, is_primary, primary_key_column)
 
+        if bucket_capacity is None:
+            bucket_capacity = calcular_Capacidad(expected_size)
+        
         self.bucket_capacity = int(bucket_capacity)
         self.index_path = self.filename
 
         if not os.path.exists(self.index_path):
-            self._init_new()
+            self._init_new(expected_size=expected_size)
         else:
             with open(self.index_path, 'rb') as f:
-                _read_header(f)  
+                D, B, dir_off = _read_header(f)
 
 
     def search(self, key: Any) -> List[Dict[str, Any]]:
@@ -127,7 +145,11 @@ class ExtendibleHashIndex(BaseIndex):
             return False
 
         sec_val = record[self.column_name]
-        pk_val = int(record[self.primary_key_column])
+        pk_val = record[self.primary_key_column]
+        if isinstance(pk_val, (int, float)):
+            pk_val_int = int(pk_val)
+        else:
+            pk_val_int = abs(hash(str(pk_val)))
         hkey = self._hash(sec_val)
 
         while True:
@@ -142,7 +164,7 @@ class ExtendibleHashIndex(BaseIndex):
                 while current_off != 0:
                     local_d, pairs, overflow_next = _read_bucket(f, current_off, B)
                     if len(pairs) < B:
-                        pairs.append((hkey, pk_val))
+                        pairs.append((hkey, pk_val_int))
                         _write_bucket(f, current_off, local_d, B, pairs, overflow_next)
                         return True
                     prev_off = current_off
@@ -159,7 +181,7 @@ class ExtendibleHashIndex(BaseIndex):
                     last_bucket_off = prev_off if prev_off != 0 else bucket_off
                     last_local_d, last_pairs, _ = _read_bucket(f, last_bucket_off, B)
                     new_overflow_off = _append_bucket(f, last_local_d, B)
-                    _write_bucket(f, new_overflow_off, last_local_d, B, [(hkey, pk_val)], 0)
+                    _write_bucket(f, new_overflow_off, last_local_d, B, [(hkey, pk_val_int)], 0)
                     _write_bucket(f, last_bucket_off, last_local_d, B, last_pairs, new_overflow_off)
                     return True
 
@@ -180,7 +202,11 @@ class ExtendibleHashIndex(BaseIndex):
                 before = len(pairs)
 
                 if primary_key is not None:
-                    pairs = [(hk, pk) for hk, pk in pairs if not (hk == hkey and pk == int(primary_key))]
+                    if isinstance(primary_key, str):
+                        pk_int = abs(hash(primary_key))
+                    else:
+                        pk_int = int(primary_key)
+                    pairs = [(hk, pk) for hk, pk in pairs if not (hk == hkey and pk == pk_int)]
                 else:
                     pairs = [(hk, pk) for hk, pk in pairs if hk != hkey]
 
@@ -202,15 +228,15 @@ class ExtendibleHashIndex(BaseIndex):
 
             sorted_dir = sorted(directory)
             last_processed = None
-            
+
             for bucket_off in sorted_dir:
 
                 if bucket_off == last_processed:
                     continue
                 last_processed = bucket_off
-                
+
                 current_off = bucket_off
-                
+
                 while current_off != 0:
                     _, pairs, overflow_next = _read_bucket(f, current_off, B)
                     for _, pk in pairs:
@@ -316,13 +342,22 @@ class ExtendibleHashIndex(BaseIndex):
         _write_bucket(f, bucket_off, local_depth, bucket_capacity, main_pairs, first_overflow)
 
 
-    def _init_new(self) -> None:
+    def _init_new(self, expected_size: Optional[int] = None) -> None:
         with open(self.index_path, 'wb') as f:
             B = self.bucket_capacity
-            _write_header(f, 1, B, 0)
-            
-            off0 = _append_bucket(f, 1, B)
-            off1 = _append_bucket(f, 1, B)
-            
-            dir_off = _write_directory_at_end(f, [off0, off1])
-            _write_header(f, 1, B, dir_off)
+            init_depth = 1
+            if expected_size and expected_size > B * 2:
+                buckets_necesitados = expected_size / (B * 0.7)
+                calc_depth = max(1, int(math.log2(buckets_necesitados)))
+                init_depth = min(calc_depth, 12)
+
+            _write_header(f, init_depth, B, 0)
+
+            num_buckets = 1 << init_depth
+            bucket_offsets = []
+            for _ in range(num_buckets):
+                off = _append_bucket(f, init_depth, B)
+                bucket_offsets.append(off)
+
+            dir_off = _write_directory_at_end(f, bucket_offsets)
+            _write_header(f, init_depth, B, dir_off)

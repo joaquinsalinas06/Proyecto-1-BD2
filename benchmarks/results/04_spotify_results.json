@@ -1,0 +1,29 @@
+[
+  {
+    "dataset": "spotify_1k",
+    "primary_index": "BTREE",
+    "secondary_index": "HASH(name)",
+    "insert_ms": 312.18,
+    "search_id_ms": 7.7745,
+    "search_name_ms": "ERROR",
+    "delete_ms": "ERROR"
+  },
+  {
+    "dataset": "spotify_10k",
+    "primary_index": "BTREE",
+    "secondary_index": "HASH(name)",
+    "insert_ms": 2732.58,
+    "search_id_ms": 7.0692,
+    "search_name_ms": "ERROR",
+    "delete_ms": "ERROR"
+  },
+  {
+    "dataset": "spotify_100k",
+    "primary_index": "BTREE",
+    "secondary_index": "HASH(name)",
+    "insert_ms": 30247.9,
+    "search_id_ms": 10.5929,
+    "search_name_ms": "ERROR",
+    "delete_ms": "ERROR"
+  }
+]
