@@ -16,6 +16,12 @@ class SequentialFileIndex(BaseIndex):
         self._min_bound = None
         self._max_bound = None
         
+        # I/O Statistics
+        self.io_stats = {
+            'disk_reads': 0,
+            'disk_writes': 0,
+        }
+        
         temp_record = DynamicRecord._build_format(table_schema)
         self.record_size = struct.calcsize(temp_record)
         
@@ -64,6 +70,17 @@ class SequentialFileIndex(BaseIndex):
         
         max_aux = max(2, int(math.log2(total_records)))
         return max_aux
+    
+    def reset_io_stats(self):
+        """Resetear contadores de I/O"""
+        self.io_stats = {
+            'disk_reads': 0,
+            'disk_writes': 0,
+        }
+    
+    def get_io_stats(self) -> Dict[str, int]:
+        """Obtener estadísticas de I/O actuales"""
+        return self.io_stats.copy()
         
     def _update_bounds(self):
         records = self._read_records_from_file(self.main_file)
@@ -79,6 +96,7 @@ class SequentialFileIndex(BaseIndex):
         record = DynamicRecord(self.table_schema, **record_data)
         packed_data = record.pack()
         
+        self.io_stats['disk_writes'] += 1  # Track I/O
         with open(file_path, 'ab') as f:
             f.write(packed_data)
         return True
@@ -88,6 +106,7 @@ class SequentialFileIndex(BaseIndex):
         if not os.path.exists(file_path):
             return records
 
+        # Track each record read as separate I/O operation
         f = None
         try:
             f = open(file_path, 'rb')
@@ -96,6 +115,7 @@ class SequentialFileIndex(BaseIndex):
                 if len(data) < self.record_size:
                     break
 
+                self.io_stats['disk_reads'] += 1  # Count each record read
                 try:
                     record = DynamicRecord.unpack(self.table_schema, data)
                     if not record.deleted:
@@ -115,6 +135,7 @@ class SequentialFileIndex(BaseIndex):
     def _write_all_records_to_file(self, file_path: str, records: List[Dict[str, Any]]) -> bool:
         with open(file_path, 'wb') as f:
             for _, record_data in enumerate(records):
+                self.io_stats['disk_writes'] += 1  # Count each record write
                 record = DynamicRecord(self.table_schema, **record_data)
                 packed_data = record.pack()
                 f.write(packed_data)
@@ -142,6 +163,7 @@ class SequentialFileIndex(BaseIndex):
 
         count = self._main_record_count + self._get_aux_count()
 
+        self.io_stats['disk_writes'] += 2  # Track clearing both files
         with open(self.main_file, 'wb') as f:
             pass
         
@@ -210,6 +232,7 @@ class SequentialFileIndex(BaseIndex):
         if not os.path.exists(file_path):
             return None
 
+        self.io_stats['disk_reads'] += 1  # Track disk read operation
         with open(file_path, 'rb') as f:
             f.seek(position * self.record_size)
             data = f.read(self.record_size)
@@ -328,6 +351,7 @@ class SequentialFileIndex(BaseIndex):
             self._min_bound = min(values)
             self._max_bound = max(values)
 
+            self.io_stats['disk_writes'] += 1  # Track clearing aux file
             with open(self.aux_file, 'wb') as f:
                 pass
 
@@ -372,6 +396,7 @@ class SequentialFileIndex(BaseIndex):
             self._min_bound = None
             self._max_bound = None
         
+        self.io_stats['disk_writes'] += 1  # Track clearing aux file
         with open(self.aux_file, 'wb') as f:
             pass
     

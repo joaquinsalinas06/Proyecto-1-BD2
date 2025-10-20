@@ -140,18 +140,72 @@ class ExtendibleHashIndex(BaseIndex):
                    begin_inclusive: bool = True, end_inclusive: bool = True) -> List[Dict[str, Any]]:
         raise NotImplementedError('Hash index no soporta rangos')
 
-    def add(self, record: Dict[str, Any]) -> bool:
-        if self.column_name not in record or self.primary_key_column not in record:
-            return False
+    def bulk_load(self, records: List[Dict[str, Any]]) -> int:
+        loaded = 0
 
-        sec_val = record[self.column_name]
-        pk_val = record[self.primary_key_column]
-        if isinstance(pk_val, (int, float)):
-            pk_val_int = int(pk_val)
-        else:
-            pk_val_int = abs(hash(str(pk_val)))
-        hkey = self._hash(sec_val)
+        entries_to_insert = []
+        # Recorremos todos los registros para extraer las claves hash y las claves primarias
+        for record in records:
+            if self.column_name not in record or self.primary_key_column not in record:
+                continue
+            
+            sec_val = record[self.column_name]
+            pk_val = record[self.primary_key_column]
+            
+            if isinstance(pk_val, (int, float)):
+                pk_val_int = int(pk_val)
+            else:
+                pk_val_int = abs(hash(str(pk_val)))
+            
+            hkey = self._hash(sec_val)
+            entries_to_insert.append((hkey, pk_val_int))
+        #Abriendo el archivo una sola vez para insertar todos los registros
+        with open(self.index_path, 'rb+') as f:
+            for _, (hkey, pk_val_int) in enumerate(entries_to_insert):
+                if self._add_entry_with_open_file(f, hkey, pk_val_int):
+                    loaded += 1
 
+        return loaded
+
+    # Esta función asume que el archivo ya está abierto y usa la logica de inserción defniida en el add
+    def _add_entry_with_open_file(self, f, hkey: int, pk_val_int: int) -> bool:
+        while True:
+            D, B, dir_off = _read_header(f)
+            i = self._dir_index(hkey, D)
+            directory = _read_directory(f, dir_off, D)
+            bucket_off = directory[i]
+
+            current_off = bucket_off
+            prev_off = 0
+            while current_off != 0:
+                local_d, pairs, overflow_next = _read_bucket(f, current_off, B)
+                if len(pairs) < B:
+                    pairs.append((hkey, pk_val_int))
+                    _write_bucket(f, current_off, local_d, B, pairs, overflow_next)
+                    f.flush()
+                    return True
+                prev_off = current_off
+                current_off = overflow_next
+
+            all_hashes = set([hkey])
+            chain_off = bucket_off
+            while chain_off != 0:
+                _, chain_pairs, chain_next = _read_bucket(f, chain_off, B)
+                all_hashes.update(hk for hk, _ in chain_pairs)
+                chain_off = chain_next
+
+            if len(all_hashes) == 1:
+                last_bucket_off = prev_off if prev_off != 0 else bucket_off
+                last_local_d, last_pairs, _ = _read_bucket(f, last_bucket_off, B)
+                new_overflow_off = _append_bucket(f, last_local_d, B)
+                _write_bucket(f, new_overflow_off, last_local_d, B, [(hkey, pk_val_int)], 0)
+                _write_bucket(f, last_bucket_off, last_local_d, B, last_pairs, new_overflow_off)
+                f.flush()
+                return True
+            self._split_bucket_with_open_file(f, i, D, B, directory)
+
+    #Se estandariza la logica de inserción en esta función, siendo la función pública add la que abre el archivo
+    def _add_entry(self, hkey: int, pk_val_int: int) -> bool:
         while True:
             with open(self.index_path, 'rb+') as f:
                 D, B, dir_off = _read_header(f)
@@ -186,6 +240,21 @@ class ExtendibleHashIndex(BaseIndex):
                     return True
 
             self._split_bucket(i, D, B, directory)
+
+    # Add pasa a hashear la clave y llamar a la función de inserción
+    def add(self, record: Dict[str, Any]) -> bool:
+        if self.column_name not in record or self.primary_key_column not in record:
+            return False
+
+        sec_val = record[self.column_name]
+        pk_val = record[self.primary_key_column]
+        if isinstance(pk_val, (int, float)):
+            pk_val_int = int(pk_val)
+        else:
+            pk_val_int = abs(hash(str(pk_val)))
+        hkey = self._hash(sec_val)
+        
+        return self._add_entry(hkey, pk_val_int)
 
     def remove(self, key: Any, primary_key: Optional[Any] = None) -> bool:
         hkey = self._hash(key)
@@ -269,51 +338,56 @@ class ExtendibleHashIndex(BaseIndex):
     def _split_bucket(self, split_index: int, global_depth: int,
                       bucket_capacity: int, directory: List[int]) -> None:
         with open(self.index_path, 'rb+') as f:
-            old_off = directory[split_index]
-            local_d, _, _ = _read_bucket(f, old_off, bucket_capacity)
-            D = global_depth
+            self._split_bucket_with_open_file(f, split_index, global_depth, bucket_capacity, directory)
 
-            if local_d == D:
-                D += 1
-                directory = directory + directory
+    # en vez de abrir el archivo, se pasa el archivo abierto, funciona tanto para el split bucket como para el bulk load
+    def _split_bucket_with_open_file(self, f, split_index: int, global_depth: int,
+                                     bucket_capacity: int, directory: List[int]) -> None:
+        old_off = directory[split_index]
+        local_d, _, _ = _read_bucket(f, old_off, bucket_capacity)
+        D = global_depth
 
-            new_off = _append_bucket(f, local_d + 1, bucket_capacity)
-            new_local_d = local_d + 1
+        if local_d == D:
+            D += 1
+            directory = directory + directory
 
-            stride = 1 << new_local_d
-            mid = stride // 2
-            M = 1 << D
+        new_off = _append_bucket(f, local_d + 1, bucket_capacity)
+        new_local_d = local_d + 1
 
-            for j in range(M):
-                if directory[j] == old_off:
-                    direct = j % stride
-                    if direct >= mid:
-                        directory[j] = new_off
+        stride = 1 << new_local_d
+        mid = stride // 2
+        M = 1 << D
 
-            all_pairs = []
-            current_off = old_off
-            visited = set()
-            while current_off != 0 and current_off not in visited:
-                visited.add(current_off)
-                _, pairs, overflow_next = _read_bucket(f, current_off, bucket_capacity)
-                all_pairs.extend(pairs)
-                current_off = overflow_next
+        for j in range(M):
+            if directory[j] == old_off:
+                direct = j % stride
+                if direct >= mid:
+                    directory[j] = new_off
 
-            left, right = [], []
-            for hk, pk in all_pairs:
-                idx = self._dir_index(hk, D)
-                bstart = (idx // stride) * stride
-                if (idx - bstart) >=  mid:
-                    right.append((hk, pk))
-                else:
-                    left.append((hk, pk))
+        all_pairs = []
+        current_off = old_off
+        visited = set()
+        while current_off != 0 and current_off not in visited:
+            visited.add(current_off)
+            _, pairs, overflow_next = _read_bucket(f, current_off, bucket_capacity)
+            all_pairs.extend(pairs)
+            current_off = overflow_next
 
-            self._write_bucket_with_overflow(f, old_off, new_local_d, bucket_capacity, left)
-            self._write_bucket_with_overflow(f, new_off, new_local_d, bucket_capacity, right)
+        left, right = [], []
+        for hk, pk in all_pairs:
+            idx = self._dir_index(hk, D)
+            bstart = (idx // stride) * stride
+            if (idx - bstart) >= mid:
+                right.append((hk, pk))
+            else:
+                left.append((hk, pk))
 
-            new_dir_off = _write_directory_at_end(f, directory)
-            _write_header(f, D, bucket_capacity, new_dir_off)
-            f.flush()
+        self._write_bucket_with_overflow(f, old_off, new_local_d, bucket_capacity, left)
+        self._write_bucket_with_overflow(f, new_off, new_local_d, bucket_capacity, right)
+
+        new_dir_off = _write_directory_at_end(f, directory)
+        _write_header(f, D, bucket_capacity, new_dir_off)
+        f.flush()
 
     def _write_bucket_with_overflow(self, f, bucket_off: int, local_depth: int,
                                     bucket_capacity: int, all_pairs: List[Tuple[int, int]]) -> None:

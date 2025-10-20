@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Tuple
-from src.parser.ast import IndexType
-
+from ...parser.ast import IndexType
 
 
 class BaseIndex(ABC):
@@ -57,9 +56,7 @@ def create_index(index_type: IndexType, column_name: str, filename: str = None,
         return SequentialFileIndex(column_name, table_schema, filename, is_primary, primary_key_column)
     elif index_type == IndexType.ISAM:
         from .isam_index import ISAMIndex
-        if not table_schema:
-            raise ValueError("ISAMIndex requires table_schema")
-        return ISAMIndex(column_name, table_schema, filename, is_primary=is_primary, primary_key_column=primary_key_column)
+        return ISAMIndex(column_name, table_schema, filename, is_primary=is_primary, primary_key_column=primary_key_column, expected_records=expected_size)
 
     elif index_type == IndexType.BTREE:
         from .bptree_clustered_index import BTreeIndex

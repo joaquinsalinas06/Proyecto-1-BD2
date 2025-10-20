@@ -95,7 +95,8 @@ class TableManager:
                 }
 
             elif isinstance(stmt, InsertStmt):
-                self.insert(stmt.table_name, stmt.values)
+                if self.insert(stmt.table_name, stmt.values):
+                    print(f"Registro insertado en '{stmt.table_name}'")
                 return {
                     "type": "insert",
                     "message": f"Registro insertado en '{stmt.table_name}'",
@@ -257,6 +258,7 @@ class TableManager:
             size = None
             element_type = None
             array_dimensions = None
+            data_type = stats['type']
 
             if stats['type'] == DataType.VARCHAR:
                 size = max(1, int(stats['max_length'] * 1.1))
@@ -266,7 +268,7 @@ class TableManager:
 
             column = ColumnDef(
                 name=header,
-                data_type=stats['type'],
+                data_type=data_type,
                 size=size,
                 element_type=element_type,
                 is_key=is_key,
@@ -293,12 +295,15 @@ class TableManager:
 
         # Segunda pasada: insertar registros en índices
         all_records = []
+        skipped_records = 0
         with open(file_path, 'r', encoding='utf-8', errors='replace') as file:
             reader = csv.DictReader(file)
             current_row = 0
             for row in reader:
                 current_row += 1
                 parsed_row = {}
+                skip_record = False
+                
                 for col in table.columns:
                     value_str = row[col.name].strip() if row[col.name] else ""
 
@@ -311,6 +316,15 @@ class TableManager:
                             parsed_row[col.name] = value_str
                     elif col.data_type == DataType.INT:
                         try:
+                            int_value = int(value_str) if value_str else 0
+                            if int_value > 2147483647 or int_value < -2147483648:
+                                skip_record = True
+                                break
+                            parsed_row[col.name] = int_value
+                        except ValueError:
+                            parsed_row[col.name] = value_str
+                    elif col.data_type == DataType.BIGINT:
+                        try:
                             parsed_row[col.name] = int(value_str) if value_str else 0
                         except ValueError:
                             parsed_row[col.name] = value_str
@@ -322,7 +336,11 @@ class TableManager:
                     else:
                         parsed_row[col.name] = value_str
 
-                all_records.append(parsed_row)
+                if not skip_record:
+                    all_records.append(parsed_row)
+                else:
+                    skipped_records += 1
+
         
         # Cuando cargamos muchos registros, es mejor hacer bulk load en los indices primarios
         for _, index in table.indexes.items():
@@ -332,7 +350,7 @@ class TableManager:
                     index.bulk_load(all_records)
                 else:
                     # Para los indices secundarios usaremos solo el add regular, por sus propiedades
-                    for record in all_records:
+                    for _, record in enumerate(all_records, 1):
                         index.add(record)
 
         self._save_table_metadata()
@@ -353,6 +371,7 @@ class TableManager:
         for _, index in table.indexes.items():
             if index is not None:
                 index.add(record_dict)
+                
 
 
     '''
@@ -879,3 +898,25 @@ class TableManager:
                     table.indexes[col.name] = index
 
             self.tables[table_name] = table
+    
+    def get_io_stats(self, table_name: str) -> Dict[str, int]:
+        if table_name not in self.tables:
+            return {}
+        
+        table = self.tables[table_name]
+        primary_index = table.indexes.get(table.key_column)
+        
+        if primary_index and hasattr(primary_index, 'get_io_stats'):
+            return primary_index.get_io_stats()
+        
+        return {}
+    
+    def reset_io_stats(self, table_name: str):
+        if table_name not in self.tables:
+            return
+        
+        table = self.tables[table_name]
+        primary_index = table.indexes.get(table.key_column)
+        
+        if primary_index and hasattr(primary_index, 'reset_io_stats'):
+            primary_index.reset_io_stats()

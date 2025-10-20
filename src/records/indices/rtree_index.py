@@ -118,6 +118,61 @@ class RTreeIndex(SpatialIndex):
         self._record_count += 1
         return True
 
+    def bulk_load(self, records: List[Dict[str, Any]]) -> int:
+        loaded = 0
+        valid_entries = []
+
+        # Obtenemos en una lista todas las llaves primarias y sus puntos asociados
+        for record in records:
+            if self.column_name not in record or self.primary_key_column not in record:
+                continue
+            
+            point = record[self.column_name]
+            pk_value = record[self.primary_key_column]
+            
+            if not isinstance(point, (list, tuple)) or len(point) != self.dimensions:
+                continue
+            
+            try:
+                pk_int = int(pk_value)
+                point_tuple = tuple(point)
+                mbr = point_tuple + point_tuple
+                valid_entries.append((pk_int, mbr, point_tuple))
+            except (ValueError, TypeError):
+                continue
+
+        # Este generador provee los datos en el formato esperado por rtree para carga masiva
+        def data_generator():
+            for pk_int, mbr, point_tuple in valid_entries:
+                yield (pk_int, mbr, point_tuple)
+
+        if hasattr(self, 'rtree_index'):
+            try:
+                self.rtree_index.close()
+            except:
+                pass
+
+        for ext in [".dat", ".idx"]:
+            filepath = f"{self.index_file}{ext}"
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except:
+                    pass
+
+        p = index.Property()
+        p.dimension = self.dimensions
+        p.leaf_capacity = self.max_entries
+        p.fill_factor = 0.7
+        
+        #Aprovechamos la carga masiva de la libreria del rtree para insertar todos los puntos de una vez
+        self.rtree_index = index.Index(self.index_file, data_generator(), properties=p)
+        
+        loaded = len(valid_entries)
+        self._record_count = loaded
+
+        return loaded
+
     def remove(self, key: Any, primary_key: Any = None) -> bool:
         if not isinstance(key, (list, tuple)) or len(key) != self.dimensions:
             return False

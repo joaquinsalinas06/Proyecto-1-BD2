@@ -14,7 +14,7 @@ class DynamicRecord:
 
             value = valores[col.name]
             
-            if col.data_type.value == "INT":
+            if col.data_type.value == "INT" or col.data_type.value == "BIGINT":
                 tranfor_valor = int(value)
         
             elif col.data_type.value == "FLOAT":
@@ -55,6 +55,8 @@ class DynamicRecord:
         for col in table_schema:
             if col.data_type.value == "INT":
                 format_parts.append("i")
+            elif col.data_type.value == "BIGINT":
+                format_parts.append("q")  # int64 (long long)
             elif col.data_type.value == "FLOAT":
                 format_parts.append("f")
             elif col.data_type.value == "VARCHAR":
