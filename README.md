@@ -70,7 +70,7 @@ ISAM organiza los datos en dos archivos principales:
 | Nivel 0            | Páginas de datos (registros ordenados) |
 | Nivel 1            | Nodos hoja que apuntan a páginas       |
 | Nivel 2            | Nodos intermedios que agrupan hojas    |
-| Nivel 3 (opcional) | Raíz cuando los datos son grandes      |
+| Nivel 3            | Raíz cuando los datos son grandes      |
 
 Representación del crecimiento dinámico:
 
