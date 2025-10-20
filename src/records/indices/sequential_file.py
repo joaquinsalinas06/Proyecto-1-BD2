@@ -16,7 +16,6 @@ class SequentialFileIndex(BaseIndex):
         self._min_bound = None
         self._max_bound = None
         
-        # I/O Statistics
         self.io_stats = {
             'disk_reads': 0,
             'disk_writes': 0,
@@ -96,7 +95,7 @@ class SequentialFileIndex(BaseIndex):
         record = DynamicRecord(self.table_schema, **record_data)
         packed_data = record.pack()
         
-        self.io_stats['disk_writes'] += 1  # Track I/O
+        self.io_stats['disk_writes'] += 1
         with open(file_path, 'ab') as f:
             f.write(packed_data)
         return True
@@ -106,7 +105,7 @@ class SequentialFileIndex(BaseIndex):
         if not os.path.exists(file_path):
             return records
 
-        # Track each record read as separate I/O operation
+
         f = None
         try:
             f = open(file_path, 'rb')
@@ -115,7 +114,7 @@ class SequentialFileIndex(BaseIndex):
                 if len(data) < self.record_size:
                     break
 
-                self.io_stats['disk_reads'] += 1  # Count each record read
+                self.io_stats['disk_reads'] += 1 
                 try:
                     record = DynamicRecord.unpack(self.table_schema, data)
                     if not record.deleted:
@@ -163,7 +162,7 @@ class SequentialFileIndex(BaseIndex):
 
         count = self._main_record_count + self._get_aux_count()
 
-        self.io_stats['disk_writes'] += 2  # Track clearing both files
+        self.io_stats['disk_writes'] += 2  
         with open(self.main_file, 'wb') as f:
             pass
         
@@ -232,7 +231,7 @@ class SequentialFileIndex(BaseIndex):
         if not os.path.exists(file_path):
             return None
 
-        self.io_stats['disk_reads'] += 1  # Track disk read operation
+        self.io_stats['disk_reads'] += 1  
         with open(file_path, 'rb') as f:
             f.seek(position * self.record_size)
             data = f.read(self.record_size)
@@ -351,7 +350,7 @@ class SequentialFileIndex(BaseIndex):
             self._min_bound = min(values)
             self._max_bound = max(values)
 
-            self.io_stats['disk_writes'] += 1  # Track clearing aux file
+            self.io_stats['disk_writes'] += 1  
             with open(self.aux_file, 'wb') as f:
                 pass
 
@@ -396,7 +395,7 @@ class SequentialFileIndex(BaseIndex):
             self._min_bound = None
             self._max_bound = None
         
-        self.io_stats['disk_writes'] += 1  # Track clearing aux file
+        self.io_stats['disk_writes'] += 1 
         with open(self.aux_file, 'wb') as f:
             pass
     

@@ -1,6 +1,4 @@
-"""
-Helper functions for benchmark preparation
-"""
+
 import csv
 import shutil
 from pathlib import Path

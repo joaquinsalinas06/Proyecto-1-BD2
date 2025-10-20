@@ -226,7 +226,6 @@ class ISAMIndex(BaseIndex):
         self.block_factor = block_factor
         self.column_name = column_name
         
-        # I/O Statistics
         self.io_stats = {
             'disk_reads': 0,
             'disk_writes': 0,
@@ -286,7 +285,7 @@ class ISAMIndex(BaseIndex):
         Escribe bloque de datos en posición específica - SOLO DISCO.
         Complejidad: O(1) - acceso directo con seek
         """
-        self.io_stats['disk_writes'] += 1  # Track I/O
+        self.io_stats['disk_writes'] += 1 
         with open(file_path, 'r+b' if position != -1 else 'ab') as f:
             if position == -1:
                 position = f.seek(0, 2)  # Ir al final
@@ -300,7 +299,7 @@ class ISAMIndex(BaseIndex):
         Lee bloque de datos desde posición - SOLO DISCO.
         Complejidad: O(1) - acceso directo con seek
         """
-        self.io_stats['disk_reads'] += 1  # Track I/O
+        self.io_stats['disk_reads'] += 1  
         if position == -1 or not os.path.exists(file_path):
             return None
         
@@ -373,7 +372,7 @@ class ISAMIndex(BaseIndex):
     
     def _write_page(self, page: Page, position: int = -1) -> int:
         """Escribe página completa en data_file"""
-        self.io_stats['page_writes'] += 1  # Track page I/O
+        self.io_stats['page_writes'] += 1 
         packed_data = page.pack()
         
         if position == -1:
@@ -389,7 +388,7 @@ class ISAMIndex(BaseIndex):
         Lee página desde data_file - DIRECTO A DISCO
         Complejidad: O(1) - acceso directo
         """
-        self.io_stats['page_reads'] += 1  # Track page I/O
+        self.io_stats['page_reads'] += 1 
         if position == -1:
             return None
         
@@ -761,7 +760,7 @@ class ISAMIndex(BaseIndex):
         
         Complejidad: O(1)
         """
-        self.io_stats['overflow_writes'] += 1  # Track overflow I/O
+        self.io_stats['overflow_writes'] += 1  
         packed_data = record.pack()
         return self._write_block(self.overflow_file, -1, packed_data)
     
@@ -775,7 +774,7 @@ class ISAMIndex(BaseIndex):
         
         Complejidad: O(k) donde k = registros en overflow
         """
-        self.io_stats['overflow_reads'] += 1  # Track overflow I/O
+        self.io_stats['overflow_reads'] += 1 
         records = []
         
         if position == -1:
@@ -848,7 +847,7 @@ class ISAMIndex(BaseIndex):
             
             if overflow_removed > 0:
                 if len(filtered_overflow) > 0:
-                    self.io_stats['overflow_writes'] += 1  # Track overflow rewrite
+                    self.io_stats['overflow_writes'] += 1  
                     new_overflow_pos = -1
                     with open(self.overflow_file, 'ab') as f:
                         new_overflow_pos = f.tell()
@@ -938,7 +937,7 @@ class ISAMIndex(BaseIndex):
         count = self.metadata.num_records
         
         # Truncar todos los archivos
-        self.io_stats['disk_writes'] += 3  # Track clearing 3 files
+        self.io_stats['disk_writes'] += 3 
         for file_path in [self.data_file, self.tree_file, self.overflow_file]:
             with open(file_path, 'wb') as f:
                 pass

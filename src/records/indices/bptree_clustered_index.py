@@ -44,7 +44,6 @@ class BTreeIndex(BaseIndex):
 
         super().__init__(column_name, filename, is_primary, primary_key_column)
 
-        # I/O Statistics
         self.io_stats = {
             'disk_reads': 0,
             'disk_writes': 0,
@@ -157,7 +156,7 @@ class BTreeIndex(BaseIndex):
         i = self._lower_bound(node.keys, node.count, lo)
 
         leaf_count = 0
-        visited_leaves = set()  # Track visited leaves to avoid cycles
+        visited_leaves = set()
         current_pid = pid
         
         while True:
@@ -194,7 +193,7 @@ class BTreeIndex(BaseIndex):
         dynamic_record = DynamicRecord(self.table_schema, **record)
 
         if not os.path.exists(self.filename):
-            self.io_stats['disk_writes'] += 1  # Track root page creation
+            self.io_stats['disk_writes'] += 1 
             self.io_stats['node_writes'] += 1
             with open(self.filename, 'wb') as file:
                 root_page = Page(
@@ -391,7 +390,7 @@ class BTreeIndex(BaseIndex):
             try:
                 with open(self.filename, "rb") as f:
                     n_pages = os.path.getsize(self.filename) // ps
-                    self.io_stats['disk_reads'] += n_pages  # Track reading all pages
+                    self.io_stats['disk_reads'] += n_pages
                     self.io_stats['node_reads'] += n_pages
                     for pid in range(n_pages):
                         f.seek(pid * ps)
@@ -680,8 +679,8 @@ class BTreeIndex(BaseIndex):
         node.count += 1
         
     def _get_page_by_id(self, pid: int) -> Page:
-        self.io_stats['disk_reads'] += 1  # Track I/O
-        self.io_stats['node_reads'] += 1  # Track node I/O
+        self.io_stats['disk_reads'] += 1 
+        self.io_stats['node_reads'] += 1 
         ps = self.page_size
         with open(self.filename, "rb") as f:
             f.seek(pid * ps)
@@ -697,8 +696,8 @@ class BTreeIndex(BaseIndex):
             )
 
     def _set_page_by_id(self, page: Page, pid: int) -> int:
-        self.io_stats['disk_writes'] += 1  # Track I/O
-        self.io_stats['node_writes'] += 1  # Track node I/O
+        self.io_stats['disk_writes'] += 1
+        self.io_stats['node_writes'] += 1
         blob = page.pack()
         mode = 'r+b' if os.path.exists(self.filename) else 'wb'
         with open(self.filename, mode) as f:

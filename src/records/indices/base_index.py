@@ -72,7 +72,7 @@ def create_index(index_type: IndexType, column_name: str, filename: str = None,
 
     elif index_type == IndexType.RTREE:
         from .rtree_index import RTreeIndex
-        # Extract dimensions from schema if available, default to 2
+        # Extraer las dimensiones del esquema de la tabla si está disponible
         dimensions = 2
         if table_schema:
             for col in table_schema:

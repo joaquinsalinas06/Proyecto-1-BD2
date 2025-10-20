@@ -72,7 +72,7 @@ def run_benchmark():
 
         with open(csv_path, 'r', encoding='utf-8', errors='replace') as f:
             reader = csv.DictReader(f)
-            all_rows = [row for row in reader if row.get('id')]
+            all_rows = [row for row in reader if row.get('AppID')]  # Games usa 'AppID' no 'id'
         
         total_records = len(all_rows)
         bulk_count = int(total_records * 0.9) # El 90% para carga masiva
@@ -109,7 +109,7 @@ def run_benchmark():
                     with open(metadata_path, 'r') as f:
                         metadata = json.load(f)
                     
-                    tables_to_remove = [k for k in metadata.keys() if k.startswith('airbnb_isam_')]
+                    tables_to_remove = [k for k in metadata.keys() if k.startswith('games_isam_')]
                     for tbl in tables_to_remove:
                         if tbl in metadata:
                             del metadata[tbl]

@@ -89,15 +89,12 @@ class Lexer:
         start_line = self.line
         
         while not self._is_at_end():
-            # Check if we hit a quote
             if self._peek() == quote_char:
-                # Look ahead to see if it's an escaped quote ('')
                 if self._peek_next() == quote_char:
-                    # It's an escaped quote, consume both and continue
-                    self._advance()  # consume first '
-                    self._advance()  # consume second '
+                    self._advance() 
+                    self._advance()
                 else:
-                    # It's the closing quote, break
+
                     break
             elif self._peek() == '\n':
                 self.line += 1
