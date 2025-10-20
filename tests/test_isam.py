@@ -7,8 +7,8 @@ sys.path.insert(0, project_root)
 from src.table_manager import TableManager
 
 def clean_indices():
-    test_dir = os.path.dirname(os.path.abspath(__file__))
-    indices_dir = os.path.join(test_dir, "indices")
+    # Clean the root indices directory (where table_manager creates files)
+    indices_dir = "indices"
     if os.path.exists(indices_dir):
         for file in os.listdir(indices_dir):
             if file.endswith('.dat'):
@@ -19,7 +19,7 @@ def clean_indices():
                     pass
 
 if __name__ == "__main__":
-    print("TEST: Índice Extendible ISAM")
+    print("TEST: Índice ISAM")
     
     clean_indices()
     tm = TableManager()
@@ -28,7 +28,7 @@ if __name__ == "__main__":
     sql = """
     CREATE TABLE usuarios (
         id INT KEY INDEX ISAM,
-        nombre VARCHAR[50] ,
+        nombre VARCHAR[50],
         edad INT
     );
     """
@@ -63,23 +63,9 @@ if __name__ == "__main__":
         if result[0]['data']:
             record = result[0]['data'][0]
             print(f"   id={id_val}: {record['nombre']}, edad={record['edad']}")
-    
-    result = tm.sql("SELECT * FROM usuarios WHERE nombre = 'Ana';")
-    print(f"   Búsqueda hash (nombre='Ana'): encontrados {len(result[0]['data'])} registro(s)")
-    
-    result = tm.sql("SELECT * FROM usuarios WHERE nombre = 'Sofia';")
-    print(f"   Búsqueda hash (nombre='Sofia'): encontrados {len(result[0]['data'])} registro(s)")
     print()
     
-    print("4. Probando búsqueda por rango...")
-    print("   Intentando rango en índice hash (debería fallar):")
-    try:
-        result = tm.sql("SELECT * FROM usuarios WHERE nombre BETWEEN 'Ana' AND 'Carlos';")
-        print(f"   ⚠ ADVERTENCIA: Búsqueda por rango funcionó (cayó a escaneo completo)")
-    except NotImplementedError as e:
-        print(f"   ✓ Excepción esperada: {e}")
-    
-    print("   Rango en índice primario (debería funcionar):")
+    print("4. Probando búsqueda por rango en ISAM...")
     result = tm.sql("SELECT * FROM usuarios WHERE id BETWEEN 10 AND 20;")
     encontrados = len(result[0]['data'])
     print(f"   Rango [10,20]: encontrados {encontrados} registros")

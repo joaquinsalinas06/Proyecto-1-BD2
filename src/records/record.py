@@ -14,7 +14,7 @@ class DynamicRecord:
 
             value = valores[col.name]
             
-            if col.data_type.value == "INT":
+            if col.data_type.value == "INT" or col.data_type.value == "BIGINT":
                 tranfor_valor = int(value)
         
             elif col.data_type.value == "FLOAT":
@@ -55,6 +55,8 @@ class DynamicRecord:
         for col in table_schema:
             if col.data_type.value == "INT":
                 format_parts.append("i")
+            elif col.data_type.value == "BIGINT":
+                format_parts.append("q")  # int64 (long long)
             elif col.data_type.value == "FLOAT":
                 format_parts.append("f")
             elif col.data_type.value == "VARCHAR":
@@ -79,10 +81,10 @@ class DynamicRecord:
             value = getattr(self, col.name)
             
             if col.data_type.value == "VARCHAR":
-                encoded = value[:col.size].ljust(col.size).encode()
+                encoded = value[:col.size].ljust(col.size).encode('utf-8', errors='replace')
                 pack_values.append(encoded)
             elif col.data_type.value == "DATE":
-                encoded = value[:10].ljust(10).encode()
+                encoded = value[:10].ljust(10).encode('utf-8', errors='replace')
                 pack_values.append(encoded)
             elif col.data_type.value == "ARRAY":
                 pack_values.extend(value)
@@ -102,10 +104,10 @@ class DynamicRecord:
         
         for col in table_schema:
             if col.data_type.value == "VARCHAR":
-                valores[col.name] = unpacked[value_index].decode().rstrip()
+                valores[col.name] = unpacked[value_index].decode('utf-8', errors='replace').rstrip()
                 value_index += 1
             elif col.data_type.value == "DATE":
-                valores[col.name] = unpacked[value_index].decode().rstrip()
+                valores[col.name] = unpacked[value_index].decode('utf-8', errors='replace').rstrip()
                 value_index += 1
             elif col.data_type.value == "ARRAY":
                 array_values = []

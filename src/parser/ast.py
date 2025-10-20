@@ -5,6 +5,7 @@ from enum import Enum
 
 class DataType(Enum):
     INT = "INT"
+    BIGINT = "BIGINT"
     FLOAT = "FLOAT"
     VARCHAR = "VARCHAR"
     DATE = "DATE"

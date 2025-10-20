@@ -1,43 +1,54 @@
 """
-ESTRUCTURA DE 2 NIVELES ( SOLO MEMORIA SECUNDARIA):
+ESTRUCTURA DE 2 NIVELES:
 ---------------------------------------------------------------
 Nivel 2 (Índice Primario): Árbol de nodos intermedios con claves separadoras
 Nivel 1 (Índice Secundario): Nodos hoja que apuntan a páginas de datos
 Nivel 0 (Datos): Páginas con registros ordenados + overflow encadenado
-
 """
 
 from typing import List, Dict, Any, Optional, Union
 import os
 import struct
 import pickle
+import math
 from .base_index import BaseIndex
 from ..record import DynamicRecord
 from ...parser.ast import ColumnDef
 
-BLOCK_FACTOR = 4  
+def calcular_BlockFactor(expected_records: Optional[int] = None) -> int:
+    if expected_records is None:
+        return 64
+    
+    optimal = int(math.sqrt(expected_records))
+
+    power_of_2 = 2 ** round(math.log2(optimal))
+    return max(32, min(512, power_of_2))
+
+
 class Page:
     """
     Página de datos con encadenamiento.
-    Estructura: [header: size(4) + next_page(4) + overflow(8)] + [registros: BLOCK_FACTOR * record_size]
+    Estructura: [header: size(4) + next_page(4) + overflow_pointer(8) + overflow_count(4)] + [registros: block_factor * record_size]
     """
-    HEADER_FORMAT = 'iiq'  
+    HEADER_FORMAT = 'iiqi'  # size, next_page, overflow_pointer, overflow_count
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
     
-    def __init__(self, records=None, next_page=-1, overflow_pointer=-1, record_size=None):
+    def __init__(self, records=None, next_page=-1, overflow_pointer=-1, overflow_count=0, record_size=None, block_factor=64):
         self.records = records or []
         self.next_page = next_page
         self.overflow_pointer = overflow_pointer
+        self.overflow_count = overflow_count  # Número de registros en overflow
         self.record_size = record_size
+        self.block_factor = block_factor
     
     @property
     def SIZE_OF_PAGE(self):
-        return self.HEADER_SIZE + BLOCK_FACTOR * self.record_size
+        return self.HEADER_SIZE + self.block_factor * self.record_size
 
     def pack(self) -> bytes:
         """Empaqueta página completa en bytes para escritura en disco"""
         header_data = struct.pack(self.HEADER_FORMAT, len(self.records), 
-                                  self.next_page, self.overflow_pointer)
+                                  self.next_page, self.overflow_pointer, self.overflow_count)
         record_data = b''
         
         # Empaquetar registros existentes
@@ -45,18 +56,35 @@ class Page:
             record_data += record.pack()
         
         # Rellenar espacios vacíos con ceros
-        empty_slots = BLOCK_FACTOR - len(self.records)
+        empty_slots = self.block_factor - len(self.records)
         record_data += b'\x00' * (self.record_size * empty_slots)
         
         return header_data + record_data
 
     @staticmethod
-    def unpack(data: bytes, table_schema: List[ColumnDef], record_size: int):
+    def unpack(data: bytes, table_schema: List[ColumnDef], record_size: int, block_factor: int = 64):
         """Desempaqueta bytes a objeto Page"""
-        size, next_page, overflow_pointer = struct.unpack(
-            Page.HEADER_FORMAT, data[:Page.HEADER_SIZE]
-        )
-        offset = Page.HEADER_SIZE
+        header_size = Page.HEADER_SIZE
+        
+        # Intentar leer con el nuevo formato (con overflow_count)
+        if len(data) >= header_size:
+            try:
+                size, next_page, overflow_pointer, overflow_count = struct.unpack(
+                    Page.HEADER_FORMAT, data[:header_size]
+                )
+            except struct.error:
+                # Formato antiguo sin overflow_count - backward compatibility
+                old_format = 'iiq'
+                old_header_size = struct.calcsize(old_format)
+                size, next_page, overflow_pointer = struct.unpack(
+                    old_format, data[:old_header_size]
+                )
+                overflow_count = 0  # No tenemos conteo en formato antiguo
+                header_size = old_header_size
+        else:
+            raise ValueError("Datos insuficientes para desempaquetar página")
+            
+        offset = header_size
         records = []
         
         for i in range(size):
@@ -70,7 +98,7 @@ class Page:
                     pass
             offset += record_size
             
-        return Page(records, next_page, overflow_pointer, record_size)
+        return Page(records, next_page, overflow_pointer, overflow_count, record_size, block_factor)
 
 
 class ISAMIntermediateNode:
@@ -188,12 +216,24 @@ class ISAMIndex(BaseIndex):
     """
     
     def __init__(self, column_name: str, table_schema: List[ColumnDef], 
-                 filename: str = None, block_factor: int = 4,
-                 is_primary: bool = False, primary_key_column: str = None):
+                 filename: str = None, block_factor: int = None,
+                 is_primary: bool = False, primary_key_column: str = None,
+                 expected_records: Optional[int] = None):
         super().__init__(column_name, filename, is_primary, primary_key_column)
         self.table_schema = table_schema
+        if block_factor is None:
+            block_factor = calcular_BlockFactor(expected_records) 
         self.block_factor = block_factor
         self.column_name = column_name
+        
+        self.io_stats = {
+            'disk_reads': 0,
+            'disk_writes': 0,
+            'page_reads': 0,
+            'page_writes': 0,
+            'overflow_reads': 0,
+            'overflow_writes': 0
+        }
         
         # Calcular tamaño de registro dinámicamente
         self.record_format = DynamicRecord._build_format(table_schema)
@@ -225,11 +265,27 @@ class ISAMIndex(BaseIndex):
                 with open(file_path, 'wb') as f:
                     pass  # Crear archivo vacío
     
+    def reset_io_stats(self):
+        """Resetear contadores de I/O"""
+        self.io_stats = {
+            'disk_reads': 0,
+            'disk_writes': 0,
+            'page_reads': 0,
+            'page_writes': 0,
+            'overflow_reads': 0,
+            'overflow_writes': 0
+        }
+    
+    def get_io_stats(self) -> Dict[str, int]:
+        """Obtener estadísticas de I/O actuales"""
+        return self.io_stats.copy()
+    
     def _write_block(self, file_path: str, position: int, data: bytes) -> int:
         """
         Escribe bloque de datos en posición específica - SOLO DISCO.
         Complejidad: O(1) - acceso directo con seek
         """
+        self.io_stats['disk_writes'] += 1 
         with open(file_path, 'r+b' if position != -1 else 'ab') as f:
             if position == -1:
                 position = f.seek(0, 2)  # Ir al final
@@ -243,6 +299,7 @@ class ISAMIndex(BaseIndex):
         Lee bloque de datos desde posición - SOLO DISCO.
         Complejidad: O(1) - acceso directo con seek
         """
+        self.io_stats['disk_reads'] += 1  
         if position == -1 or not os.path.exists(file_path):
             return None
         
@@ -251,8 +308,7 @@ class ISAMIndex(BaseIndex):
                 f.seek(position)
                 data = f.read(size)
                 return data if len(data) == size else None
-        except Exception as e:
-            print(f"Error leyendo bloque en {position}: {e}")
+        except Exception:
             return None
     
     def _load_existing_index(self):
@@ -264,7 +320,7 @@ class ISAMIndex(BaseIndex):
                     self.metadata = ISAMMetadata.unpack(data)
                    
         except Exception as e:
-            print(f"Iniciando nuevo índice ISAM: {e}")
+            pass
     
     def _save_metadata(self):
         """Persiste metadatos en disco"""
@@ -279,20 +335,16 @@ class ISAMIndex(BaseIndex):
         full_data = size_bytes + packed_data
         
         position = self._write_block(self.tree_file, position, full_data)
-       
+
         
         return position
     
     def _read_node(self, position: int) -> Optional[Union[ISAMIntermediateNode, ISAMLeafNode]]:
         """
-
         Complejidad: O(1) - I/O directo
         """
         if position == -1:
-            return None
-        
-       
-        
+            return None        
         try:
             # Leer tamaño del nodo
             size_data = self._read_block(self.tree_file, position, 4)
@@ -313,16 +365,14 @@ class ISAMIndex(BaseIndex):
             else:
                 node = ISAMIntermediateNode.unpack(node_data)
             
-           
-            
             return node
             
-        except Exception as e:
-            print(f"Error leyendo nodo en {position}: {e}")
+        except Exception:
             return None
     
     def _write_page(self, page: Page, position: int = -1) -> int:
         """Escribe página completa en data_file"""
+        self.io_stats['page_writes'] += 1 
         packed_data = page.pack()
         
         if position == -1:
@@ -338,19 +388,19 @@ class ISAMIndex(BaseIndex):
         Lee página desde data_file - DIRECTO A DISCO
         Complejidad: O(1) - acceso directo
         """
+        self.io_stats['page_reads'] += 1 
         if position == -1:
             return None
         
-        page_size = Page.HEADER_SIZE + BLOCK_FACTOR * self.record_size
+        page_size = Page.HEADER_SIZE + self.block_factor * self.record_size
         data = self._read_block(self.data_file, position, page_size)
         
         if not data:
             return None
         
         try:
-            return Page.unpack(data, self.table_schema, self.record_size)
-        except Exception as e:
-            print(f"Error desempaquetando página: {e}")
+            return Page.unpack(data, self.table_schema, self.record_size, self.block_factor)
+        except Exception:
             return None
     
     def _get_record_key(self, record: DynamicRecord) -> Any:
@@ -368,6 +418,11 @@ class ISAMIndex(BaseIndex):
             result[col.name] = getattr(record, col.name, None)
         return result
     
+    def bulk_load(self, records: List[Dict[str, Any]]) -> bool:
+        self.build(records)
+        return True
+
+
     def build(self, records: List[Dict[str, Any]]):
         """
         Construye índice ISAM de 2 niveles desde registros.
@@ -384,20 +439,15 @@ class ISAMIndex(BaseIndex):
         if not records:
             return
         
-        
-        
-        # 1. Convertir y ordenar registros
         dynamic_records = [self._dict_to_record(rec) for rec in records]
         dynamic_records.sort(key=lambda r: self._get_record_key(r))
         
-        # 2. Crear páginas de datos (Nivel 0)
         leaf_nodes_data = []
         prev_page_pos = -1
         
-       
         for i in range(0, len(dynamic_records), self.block_factor):
             page_records = dynamic_records[i:i + self.block_factor]
-            page = Page(records=page_records, record_size=self.record_size)
+            page = Page(records=page_records, record_size=self.record_size, block_factor=self.block_factor)
             page_pos = self._write_page(page)
             
             # Enlazar con página anterior
@@ -413,32 +463,24 @@ class ISAMIndex(BaseIndex):
             })
             prev_page_pos = page_pos
         
-       
-        
-        # 3. Construir árbol de 2 niveles
         self._build_two_level_tree(leaf_nodes_data)
         
-        # 4. Actualizar metadatos
         self.metadata.num_records = len(dynamic_records)
         self.metadata.is_built = True
         self.metadata.num_leaf_nodes = len(leaf_nodes_data)
         self._save_metadata()
         
-      
-        
     def _build_two_level_tree(self, leaf_data: List[Dict]):
         """
-        
-        Construye árbol de exactamente 2 niveles 
+        Construye árbol de exactamente 2 niveles.
         Todas las escrituras van directo a disco.
         """
         if not leaf_data:
             return
         
-        
-        
+
         # NIVEL 1: Crear nodos hoja
-       
+
         leaf_positions = []
         
         for i, data in enumerate(leaf_data):
@@ -456,10 +498,6 @@ class ISAMIndex(BaseIndex):
             leaf.next_pointer = leaf_positions[i + 1][0]
             self._write_node(leaf, leaf_positions[i][0])
         
-        print(f" {len(leaf_positions)} nodos hoja escritos en disco")
-        
-        # NIVEL 2: Crear nodos intermedios
-        print(f"Nivel 2: Creando nodos intermedios...")
         intermediate_nodes = []
         
         for i in range(0, len(leaf_positions), self.block_factor):
@@ -477,14 +515,10 @@ class ISAMIndex(BaseIndex):
             pos = self._write_node(intermediate)
             intermediate_nodes.append((pos, group[0][1]))
         
-        print(f" {len(intermediate_nodes)} nodos intermedios escritos")
-        
-        # Establecer raíz
         if len(intermediate_nodes) == 1:
             self.metadata.root_pointer = intermediate_nodes[0][0]
             self.metadata.num_levels = 2
         else:
-            print(f"Creando raíz superior para {len(intermediate_nodes)} nodos...")
             root = ISAMIntermediateNode(
                 values=[item[1] for item in intermediate_nodes[1:]],
                 pointers=[item[0] for item in intermediate_nodes],
@@ -492,8 +526,6 @@ class ISAMIndex(BaseIndex):
             )
             self.metadata.root_pointer = self._write_node(root)
             self.metadata.num_levels = 3
-        
-        print(f" Raíz establecida en posición {self.metadata.root_pointer}")
     
     # ====================================================================
     #                  BÚSQUEDA (CON BÚSQUEDA BINARIA)
@@ -514,37 +546,31 @@ class ISAMIndex(BaseIndex):
         if not self.metadata.is_built or self.metadata.root_pointer == -1:
             return []
         
-        # 1. Encontrar nodo hoja (lecturas de disco)
         leaf_node = self._find_leaf_for_key_binary(key)
         if not leaf_node:
             return []
-        
         
         page = self._read_page(leaf_node.data_page_pointer)
         if not page:
             return []
         
         results = []
-        
-        
         records_list = page.records
         first_idx = self._binary_search_in_list(records_list, key)
         
         if first_idx != -1:
-            # Recoger todos los registros con la misma clave
             idx = first_idx
             while idx < len(records_list) and self._get_record_key(records_list[idx]) == key:
                 results.append(self._record_to_dict(records_list[idx]))
                 idx += 1
             
-            # Revisar hacia atrás por duplicados
             idx = first_idx - 1
             while idx >= 0 and self._get_record_key(records_list[idx]) == key:
                 results.insert(0, self._record_to_dict(records_list[idx]))
                 idx -= 1
         
         if page.overflow_pointer != -1:
-            overflow_records = self._read_overflow(page.overflow_pointer)
+            overflow_records = self._read_overflow(page.overflow_pointer, page.overflow_count)
             for record in overflow_records:
                 if self._get_record_key(record) == key:
                     results.append(self._record_to_dict(record))
@@ -666,7 +692,7 @@ class ISAMIndex(BaseIndex):
                     results.append(self._record_to_dict(records_list[idx]))
             
             if page.overflow_pointer != -1:
-                overflow_records = self._read_overflow(page.overflow_pointer)
+                overflow_records = self._read_overflow(page.overflow_pointer, page.overflow_count)
                 for record in overflow_records:
                     key_val = self._get_record_key(record)
                     start_ok = (key_val >= begin_key) if begin_inclusive else (key_val > begin_key)
@@ -720,7 +746,8 @@ class ISAMIndex(BaseIndex):
             
             if page.overflow_pointer == -1:
                 page.overflow_pointer = overflow_pos
-                self._write_page(page, leaf_node.data_page_pointer)
+            page.overflow_count += 1  # Incrementar contador de overflow
+            self._write_page(page, leaf_node.data_page_pointer)
         
         self.metadata.num_records += 1
         self._save_metadata()
@@ -733,24 +760,34 @@ class ISAMIndex(BaseIndex):
         
         Complejidad: O(1)
         """
+        self.io_stats['overflow_writes'] += 1  
         packed_data = record.pack()
         return self._write_block(self.overflow_file, -1, packed_data)
     
-    def _read_overflow(self, position: int) -> List[DynamicRecord]:
+    def _read_overflow(self, position: int, overflow_count: int = None) -> List[DynamicRecord]:
         """
-        Lee TODOS los registros desde la posición de overflow hasta el final.
+        Lee registros desde la posición de overflow.
+        
+        Args:
+            position: Posición en el archivo de overflow
+            overflow_count: Número de registros en overflow (None para leer hasta EOF - backward compatibility)
         
         Complejidad: O(k) donde k = registros en overflow
         """
+        self.io_stats['overflow_reads'] += 1 
         records = []
         
         if position == -1:
             return records
         
         try:
-            # Calcular cuántos registros hay en overflow
-            file_size = os.path.getsize(self.overflow_file)
-            num_overflow_records = (file_size - position) // self.record_size
+            if overflow_count is None or overflow_count == 0:
+                # Formato antiguo sin count - leer hasta el final (backward compatibility)
+                file_size = os.path.getsize(self.overflow_file)
+                num_overflow_records = (file_size - position) // self.record_size
+            else:
+                # Formato nuevo con count
+                num_overflow_records = overflow_count
             
             for i in range(num_overflow_records):
                 offset = position + (i * self.record_size)
@@ -764,7 +801,7 @@ class ISAMIndex(BaseIndex):
                     except:
                         pass
         except Exception as e:
-            print(f"Error leyendo overflow en {position}: {e}")
+            pass
         
         return records
     
@@ -797,11 +834,11 @@ class ISAMIndex(BaseIndex):
         
         original_count = len(page.records)
         page.records = [r for r in page.records if self._get_record_key(r) != key]
-        removed_count += (original_count - len(page.records))
+        removed_from_page = original_count - len(page.records)
+        removed_count += removed_from_page
         
-        # 2. INCLUIR OVERFLOW: Filtrar registros en overflow
         if page.overflow_pointer != -1:
-            overflow_records = self._read_overflow(page.overflow_pointer)
+            overflow_records = self._read_overflow(page.overflow_pointer, page.overflow_count)
             original_overflow = len(overflow_records)
             
             filtered_overflow = [r for r in overflow_records if self._get_record_key(r) != key]
@@ -810,15 +847,19 @@ class ISAMIndex(BaseIndex):
             
             if overflow_removed > 0:
                 if len(filtered_overflow) > 0:
+                    self.io_stats['overflow_writes'] += 1  
                     new_overflow_pos = -1
-                    for record in filtered_overflow:
-                        if new_overflow_pos == -1:
-                            new_overflow_pos = self._write_overflow(record)
-                        else:
-                            self._write_overflow(record)
+                    with open(self.overflow_file, 'ab') as f:
+                        new_overflow_pos = f.tell()
+                        for record in filtered_overflow:
+                            packed_data = record.pack()
+                            f.write(packed_data)
+                    
                     page.overflow_pointer = new_overflow_pos
+                    page.overflow_count = len(filtered_overflow)
                 else:
                     page.overflow_pointer = -1
+                    page.overflow_count = 0
         
         if removed_count > 0:
             self._write_page(page, leaf_node.data_page_pointer)
@@ -876,7 +917,7 @@ class ISAMIndex(BaseIndex):
                     results.append(self._record_to_dict(record))
                 
                 if page.overflow_pointer != -1:
-                    overflow_records = self._read_overflow(page.overflow_pointer)
+                    overflow_records = self._read_overflow(page.overflow_pointer, page.overflow_count)
                     for record in overflow_records:
                         results.append(self._record_to_dict(record))
             
@@ -896,6 +937,7 @@ class ISAMIndex(BaseIndex):
         count = self.metadata.num_records
         
         # Truncar todos los archivos
+        self.io_stats['disk_writes'] += 3 
         for file_path in [self.data_file, self.tree_file, self.overflow_file]:
             with open(file_path, 'wb') as f:
                 pass
@@ -904,14 +946,12 @@ class ISAMIndex(BaseIndex):
         self.metadata = ISAMMetadata()
         self._save_metadata()
         
-       
         
-        print(f" Índice limpiado: {count} registros eliminados")
         return count
     
     def close(self):
-        """k
+        """
         Solo persiste metadatos finales.
         """
         self._save_metadata()
-        
+

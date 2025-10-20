@@ -1,16 +1,23 @@
 from __future__ import annotations
 import os
 import struct
-import hashlib
+import math
 from dataclasses import dataclass
-from typing import Generic, Optional, TypeVar, Deque, List, Dict, Any, Protocol
-from collections import deque
-from records.indices.base_index import BaseIndex
-from records.record import DynamicRecord
-# from ...parser.ast import ColumnDef
-from parser.ast import ColumnDef
+from typing import Optional, List, Dict, Any
+from .base_index import BaseIndex
+from ..record import DynamicRecord
+from ...parser.ast import ColumnDef
 from .page_btree_clustered import Page, Int64Codec, FixedStrCodec
 
+
+def calcular_M(expected_records: Optional[int] = None) -> int:
+    if expected_records is None:
+        return 128 
+    optimal = int(2 * math.sqrt(expected_records))
+
+    power_of_2 = 2 ** round(math.log2(optimal))
+
+    return max(64, min(1024, power_of_2))
 
 @dataclass
 class ExtractionResult():
@@ -26,13 +33,23 @@ class BTreeIndex(BaseIndex):
                  filename: str = None, 
                  is_primary: bool = True, # true always bc is clustered
                  primary_key_column: str = None,
-                 M: int = 4
+                 M: int = None,
+                 expected_records: Optional[int] = None
                  ):
+        if M is None:
+            M = calcular_M(expected_records)
         
         if M < 3:
             raise ValueError("M must be greater than 2")
 
         super().__init__(column_name, filename, is_primary, primary_key_column)
+
+        self.io_stats = {
+            'disk_reads': 0,
+            'disk_writes': 0,
+            'node_reads': 0,
+            'node_writes': 0
+        }
 
         col = next((c for c in table_schema if c.name == column_name), None)
 
@@ -61,6 +78,22 @@ class BTreeIndex(BaseIndex):
             record_size=self.RECORD_SIZE
             )
 
+        if os.path.exists(self.filename) and os.path.getsize(self.filename) > 0:
+            self.root_page = 0
+    
+    def reset_io_stats(self):
+        """Resetear contadores de I/O"""
+        self.io_stats = {
+            'disk_reads': 0,
+            'disk_writes': 0,
+            'node_reads': 0,
+            'node_writes': 0
+        }
+    
+    def get_io_stats(self) -> Dict[str, int]:
+        """Obtener estadísticas de I/O actuales"""
+        return self.io_stats.copy()
+
     def search(self, key: Any) -> List[Dict[str, Any]]:
         """
             Igualdad sobre índice clustered (sin duplicados).
@@ -87,12 +120,11 @@ class BTreeIndex(BaseIndex):
 
         if i < node.count and node.keys[i] == key:
             rec = node.records[i] if i < len(node.records) else None
-            if rec is not None:
-                pk_name = getattr(self, "primary_key_column", None)
-                pk_val = getattr(rec, pk_name, None) if pk_name else None
-                out.append({"primary_key": pk_val})
+            if rec is not None and not getattr(rec, "deleted", False):
+                out.append({col.name: getattr(rec, col.name) for col in rec.schema})
+
             else:
-                out.append({"primary_key": None})
+                pass
 
         return out
 
@@ -123,7 +155,17 @@ class BTreeIndex(BaseIndex):
         # posición inicial en la hoja
         i = self._lower_bound(node.keys, node.count, lo)
 
+        leaf_count = 0
+        visited_leaves = set()
+        current_pid = pid
+        
         while True:
+            if current_pid in visited_leaves:
+                break
+            visited_leaves.add(current_pid)
+            
+            leaf_count += 1
+
             while i < node.count:
                 k = node.keys[i]
                 if k is None:
@@ -133,33 +175,30 @@ class BTreeIndex(BaseIndex):
                     return out
 
                 rec = node.records[i] if i < len(node.records) else None
-                if rec is not None and getattr(self, "primary_key_column", None):
-                    pk = getattr(rec, self.primary_key_column, None)
-                else:
-                    pk = None
-                out.append({"primary_key": pk})
+                if rec is not None and not getattr(rec, "deleted", False):
+                    out.append({col.name: getattr(rec, col.name) for col in rec.schema})
                 i += 1
 
-            # pasa a la siguiente hoja
             if node.next_page is None or node.next_page == -1:
                 break
-            node = self._get_page_by_id(node.next_page)
+            current_pid = node.next_page
+            node = self._get_page_by_id(current_pid)
             i = 0
 
         return out
 
     def add(self, record: Dict[str, Any]) -> bool:
-
         key = record[self.column_name]
 
         dynamic_record = DynamicRecord(self.table_schema, **record)
 
         if not os.path.exists(self.filename):
-            
+            self.io_stats['disk_writes'] += 1 
+            self.io_stats['node_writes'] += 1
             with open(self.filename, 'wb') as file:
                 root_page = Page(
-                    block_factor=self.M, 
-                    key_codec=self.key_codec, 
+                    block_factor=self.M,
+                    key_codec=self.key_codec,
                     is_leaf=True,
                     record_size=self.RECORD_SIZE # 9
                     )
@@ -169,17 +208,17 @@ class BTreeIndex(BaseIndex):
                 file.write(root_page.pack())
             self.root_page = 0
             return True
-    
+
         split_result = self._insert(
-            id=self.root_page, 
-            key=key, 
+            id=self.root_page,
+            key=key,
             record=dynamic_record
             )
 
         if split_result is not None:
             parent = Page(
-                block_factor=self.M, 
-                key_codec=self.key_codec, 
+                block_factor=self.M,
+                key_codec=self.key_codec,
                 is_leaf=False,
                 record_size=self.RECORD_SIZE
                 )
@@ -188,25 +227,121 @@ class BTreeIndex(BaseIndex):
             parent.children[1] = split_result.right_tree
             parent.count = 1
             self.root_page = self._append_page(parent)
-        
+
         return True
     
     def remove(self, key: Any) -> bool:
         
         if self.root_page == -1:
             return True
-        
+
         self._remove(self.root_page, key)
 
         root = self._get_page_by_id(self.root_page)
 
         if root and root.count == 0:
             self.root_page = root.children[0]
-            if self.root_page == -1: 
+            if self.root_page == -1:
                 return True
             root = self._get_page_by_id(self.root_page)
             if root.count == 0:
                 self.root_page = -1
+
+        return True
+
+    def bulk_load(self, records: List[Dict[str, Any]]) -> bool:
+        if not records:
+            return True
+
+        valid_records = [r for r in records if self.column_name in r]
+
+        if not valid_records:
+            return False
+
+        # ordenamos los registros por clave
+        sorted_records = sorted(valid_records, key=lambda x: x[self.column_name])
+
+        # Transformamos a un record dinámico
+        dynamic_records = [DynamicRecord(self.table_schema, **rec) for rec in sorted_records]
+
+        if os.path.exists(self.filename):
+            os.remove(self.filename)
+
+        leaf_pages = []
+        records_per_leaf = self.M - 1 
+        
+        # Creamos nodos hoja que almacenan los registros, considerando que por hoja puede haber
+        # hasta M-1 registros (claves + registros)
+        for i in range(0, len(dynamic_records), records_per_leaf):
+            batch = dynamic_records[i:i + records_per_leaf]
+            
+            leaf = Page(
+                block_factor=self.M,
+                key_codec=self.key_codec,
+                is_leaf=True,
+                record_size=self.RECORD_SIZE
+            )
+            
+            for j, rec in enumerate(batch):
+                leaf.keys[j] = rec.__dict__[self.column_name]
+                leaf.records[j] = rec
+            
+            leaf.count = len(batch)
+            leaf_pages.append(leaf)
+        
+        # cada una de las hojas las unimos (mejora para rango)
+        for i in range(len(leaf_pages) - 1):
+            leaf_pages[i].next_page = i + 1
+
+        if leaf_pages:
+            leaf_pages[-1].next_page = -1
+
+        # Escribimos las hojas en disco
+        for page in leaf_pages:
+            self._append_page(page)
+
+        # If only one leaf, it's the root
+        if len(leaf_pages) == 1:
+            self.root_page = 0
+            return True
+
+        # Construimos los nodos internos hacia arriba
+        current_level = list(range(len(leaf_pages)))
+        
+        while len(current_level) > 1:
+            next_level = []
+            keys_per_internal = self.M - 1
+            
+            for i in range(0, len(current_level), keys_per_internal + 1):
+                # del nivel en el que estemos tomamos un batch de hijos
+                children_batch = current_level[i:i + keys_per_internal + 1]
+                
+                internal = Page(
+                    block_factor=self.M,
+                    key_codec=self.key_codec,
+                    is_leaf=False,
+                    record_size=self.RECORD_SIZE
+                )
+                
+                # Definimos los hijos utilizando los IDs de página
+                for j, child_id in enumerate(children_batch):
+                    internal.children[j] = child_id
+                
+                # Definimos las claves del nodo interno
+                for j in range(1, len(children_batch)):
+                    child_page = self._get_page_by_id(children_batch[j])
+                    internal.keys[j - 1] = child_page.keys[0]
+                
+                internal.count = len(children_batch) - 1
+                
+                # Escribimos el nodo interno en disco 
+                internal_id = self._append_page(internal)
+                next_level.append(internal_id)
+            
+            current_level = next_level
+
+        # El ultimo nodo q queda es la raíz
+        self.root_page = current_level[0]
 
         return True
 
@@ -255,6 +390,8 @@ class BTreeIndex(BaseIndex):
             try:
                 with open(self.filename, "rb") as f:
                     n_pages = os.path.getsize(self.filename) // ps
+                    self.io_stats['disk_reads'] += n_pages
+                    self.io_stats['node_reads'] += n_pages
                     for pid in range(n_pages):
                         f.seek(pid * ps)
                         data = f.read(ps)
@@ -542,6 +679,8 @@ class BTreeIndex(BaseIndex):
         node.count += 1
         
     def _get_page_by_id(self, pid: int) -> Page:
+        self.io_stats['disk_reads'] += 1 
+        self.io_stats['node_reads'] += 1 
         ps = self.page_size
         with open(self.filename, "rb") as f:
             f.seek(pid * ps)
@@ -557,6 +696,8 @@ class BTreeIndex(BaseIndex):
             )
 
     def _set_page_by_id(self, page: Page, pid: int) -> int:
+        self.io_stats['disk_writes'] += 1
+        self.io_stats['node_writes'] += 1
         blob = page.pack()
         mode = 'r+b' if os.path.exists(self.filename) else 'wb'
         with open(self.filename, mode) as f:
@@ -629,7 +770,7 @@ class BTreeIndex(BaseIndex):
                 id: int, 
                 key: Any
                 ) -> None:
-        
+
         node = self._get_page_by_id(id)
 
         i = 0
@@ -686,7 +827,6 @@ class BTreeIndex(BaseIndex):
                 self._set_page_by_id(nc_iplus, right_id)
             # join con izquierdo
             elif i > 0:
-
                 self._join(nc_iminus, node.keys[i - 1], nc_i)
                 nc_iminus.next_page = nc_i.next_page
                 deleted_node_id = node.children[i]

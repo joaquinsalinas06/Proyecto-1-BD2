@@ -3,7 +3,7 @@ import struct
 from dataclasses import dataclass
 from typing import Generic, Optional, TypeVar, Deque, List, Dict, Any, Protocol
 from collections import deque
-from records.record import DynamicRecord
+from ..record import DynamicRecord
 
 
 class KeyCodec(Protocol):

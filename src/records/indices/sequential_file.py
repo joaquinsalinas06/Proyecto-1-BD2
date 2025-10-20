@@ -1,5 +1,6 @@
 import os
 import struct
+import math
 from typing import List, Dict, Any, Optional
 from .base_index import BaseIndex
 from ..record import DynamicRecord
@@ -7,13 +8,18 @@ from ...parser.ast import ColumnDef
 
 
 class SequentialFileIndex(BaseIndex):
-    def __init__(self, column_name: str, table_schema: List[ColumnDef], filename: str = None, is_primary: bool = False, primary_key_column: str = None, max_auxiliary_records: int = 5):
+    def __init__(self, column_name: str, table_schema: List[ColumnDef], filename: str = None, is_primary: bool = False, primary_key_column: str = None, max_auxiliary_records: int = None):
         super().__init__(column_name, filename, is_primary, primary_key_column)
         self.table_schema = table_schema
-        self.max_auxiliary_records = max_auxiliary_records
+        self._fixed_max_aux = max_auxiliary_records
         
         self._min_bound = None
         self._max_bound = None
+        
+        self.io_stats = {
+            'disk_reads': 0,
+            'disk_writes': 0,
+        }
         
         temp_record = DynamicRecord._build_format(table_schema)
         self.record_size = struct.calcsize(temp_record)
@@ -44,13 +50,36 @@ class SequentialFileIndex(BaseIndex):
     def _initialize_main_count(self) -> int:
         if not os.path.exists(self.main_file):
             return 0
-        
+
         file_size = os.path.getsize(self.main_file)
         count = file_size // self.record_size
 
         self._update_bounds()
-        
+
         return count
+
+    def calcular_Aux(self) -> int:
+        if self._fixed_max_aux is not None:
+            return self._fixed_max_aux
+
+        total_records = self._main_record_count + self._get_aux_count()
+
+        if total_records == 0:
+            return 5
+        
+        max_aux = max(2, int(math.log2(total_records)))
+        return max_aux
+    
+    def reset_io_stats(self):
+        """Resetear contadores de I/O"""
+        self.io_stats = {
+            'disk_reads': 0,
+            'disk_writes': 0,
+        }
+    
+    def get_io_stats(self) -> Dict[str, int]:
+        """Obtener estadísticas de I/O actuales"""
+        return self.io_stats.copy()
         
     def _update_bounds(self):
         records = self._read_records_from_file(self.main_file)
@@ -66,6 +95,7 @@ class SequentialFileIndex(BaseIndex):
         record = DynamicRecord(self.table_schema, **record_data)
         packed_data = record.pack()
         
+        self.io_stats['disk_writes'] += 1
         with open(file_path, 'ab') as f:
             f.write(packed_data)
         return True
@@ -74,25 +104,37 @@ class SequentialFileIndex(BaseIndex):
         records = []
         if not os.path.exists(file_path):
             return records
-        
-        with open(file_path, 'rb') as f:
+
+
+        f = None
+        try:
+            f = open(file_path, 'rb')
             while True:
                 data = f.read(self.record_size)
                 if len(data) < self.record_size:
                     break
-                
-                record = DynamicRecord.unpack(self.table_schema, data)
-                if not record.deleted:
-                    record_dict = {}
-                    for col in self.table_schema:
-                        record_dict[col.name] = getattr(record, col.name)
-                    records.append(record_dict)
-        
+
+                self.io_stats['disk_reads'] += 1 
+                try:
+                    record = DynamicRecord.unpack(self.table_schema, data)
+                    if not record.deleted:
+                        record_dict = {}
+                        for col in self.table_schema:
+                            record_dict[col.name] = getattr(record, col.name)
+                        records.append(record_dict)
+                except (UnicodeDecodeError, struct.error):
+                    # Skip corrupted records
+                    continue
+        finally:
+            if f is not None:
+                f.close()
+
         return records
     
     def _write_all_records_to_file(self, file_path: str, records: List[Dict[str, Any]]) -> bool:
         with open(file_path, 'wb') as f:
-            for record_data in records:
+            for _, record_data in enumerate(records):
+                self.io_stats['disk_writes'] += 1  # Count each record write
                 record = DynamicRecord(self.table_schema, **record_data)
                 packed_data = record.pack()
                 f.write(packed_data)
@@ -120,6 +162,7 @@ class SequentialFileIndex(BaseIndex):
 
         count = self._main_record_count + self._get_aux_count()
 
+        self.io_stats['disk_writes'] += 2  
         with open(self.main_file, 'wb') as f:
             pass
         
@@ -132,7 +175,6 @@ class SequentialFileIndex(BaseIndex):
         
     def search(self, key: Any) -> List[Dict[str, Any]]:
         results = []
-        
         if os.path.exists(self.main_file):
             total_records = self._main_record_count
             if total_records > 0:
@@ -160,7 +202,6 @@ class SequentialFileIndex(BaseIndex):
                     found_record = self._read_record_at_position(self.main_file, found_position)
                     if found_record:
                         results.append(found_record)
-                    
                     pos = found_position - 1
                     while pos >= 0:
                         record = self._read_record_at_position(self.main_file, pos)
@@ -189,23 +230,27 @@ class SequentialFileIndex(BaseIndex):
     def _read_record_at_position(self, file_path: str, position: int) -> Optional[Dict[str, Any]]:
         if not os.path.exists(file_path):
             return None
-        
+
+        self.io_stats['disk_reads'] += 1  
         with open(file_path, 'rb') as f:
             f.seek(position * self.record_size)
             data = f.read(self.record_size)
-            
+
             if len(data) < self.record_size:
                 return None
-            
-            record = DynamicRecord.unpack(self.table_schema, data)
-            if record.deleted:
+
+            try:
+                record = DynamicRecord.unpack(self.table_schema, data)
+                if record.deleted:
+                    return None
+
+                record_dict = {}
+                for col in self.table_schema:
+                    record_dict[col.name] = getattr(record, col.name)
+
+                return record_dict
+            except (UnicodeDecodeError, struct.error):
                 return None
-            
-            record_dict = {}
-            for col in self.table_schema:
-                record_dict[col.name] = getattr(record, col.name)
-            
-            return record_dict
     
     def rangeSearch(self, begin_key: Any, end_key: Any, begin_inclusive: bool = True, end_inclusive: bool = True) -> List[Dict[str, Any]]:
         results = []
@@ -270,22 +315,65 @@ class SequentialFileIndex(BaseIndex):
         
         return results
     
+    def bulk_load(self, records: List[Dict[str, Any]]) -> bool:
+        if not records:
+            return True
+
+        valid_records = [r for r in records if self.column_name in r]
+
+        if not valid_records:
+            return False
+        
+        # Ordenamos los registros segun la columna de indice
+        sorted_records = sorted(valid_records, key=lambda x: x[self.column_name])
+
+        if self._main_record_count == 0:
+            #Si no tenemos registros en el archivo principal, simplemente escribimos los registros ordenados
+            self._write_all_records_to_file(self.main_file, sorted_records)
+            self._main_record_count = len(sorted_records)
+            
+            values = [r[self.column_name] for r in sorted_records]
+            self._min_bound = min(values)
+            self._max_bound = max(values)
+
+            return True
+        else:
+            #Si tenemos registros en el archivo principal, leemos todos los registros, los combinamos con los nuevos registros ordenados y reescribimos el archivo principal
+            main_records = self._read_records_from_file(self.main_file)
+            all_records = main_records + sorted_records
+            all_records.sort(key=lambda x: x[self.column_name])
+
+            self._write_all_records_to_file(self.main_file, all_records)
+            self._main_record_count = len(all_records)
+
+            values = [r[self.column_name] for r in all_records]
+            self._min_bound = min(values)
+            self._max_bound = max(values)
+
+            self.io_stats['disk_writes'] += 1  
+            with open(self.aux_file, 'wb') as f:
+                pass
+
+            return True
+
     def add(self, record: Dict[str, Any]) -> bool:
         if self.column_name not in record:
             return False
-        
+
         value = record[self.column_name]
         if self._min_bound is None or value < self._min_bound:
             self._min_bound = value
         if self._max_bound is None or value > self._max_bound:
             self._max_bound = value
-            
+
         self._write_record_to_file(self.aux_file, record)
-        
+
         aux_count = self._get_aux_count()
-        if aux_count >= self.max_auxiliary_records:
+        max_aux = self.calcular_Aux()
+
+        if aux_count >= max_aux:
             self._reconstruct_file()
-            
+
         return True
     
     def _reconstruct_file(self):
@@ -307,6 +395,7 @@ class SequentialFileIndex(BaseIndex):
             self._min_bound = None
             self._max_bound = None
         
+        self.io_stats['disk_writes'] += 1 
         with open(self.aux_file, 'wb') as f:
             pass
     

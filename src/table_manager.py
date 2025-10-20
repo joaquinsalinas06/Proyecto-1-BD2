@@ -95,7 +95,8 @@ class TableManager:
                 }
 
             elif isinstance(stmt, InsertStmt):
-                self.insert(stmt.table_name, stmt.values)
+                if self.insert(stmt.table_name, stmt.values):
+                    print(f"Registro insertado en '{stmt.table_name}'")
                 return {
                     "type": "insert",
                     "message": f"Registro insertado en '{stmt.table_name}'",
@@ -203,7 +204,7 @@ class TableManager:
         column_stats = {}
 
         # Primera pasada: Obtenemos estadísticas de las columnas
-        with open(file_path, 'r', encoding='utf-8') as file:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as file:
             reader = csv.DictReader(file)
             headers = reader.fieldnames
 
@@ -228,14 +229,19 @@ class TableManager:
                         stats['type'] = DataType.ARRAY
                         continue
 
-                    if not value.isdigit() and value:
-                        if value.lstrip('-').replace('.', '', 1).isdigit():
+                    if value: 
+                        is_int = value.isdigit() or (value.startswith('-') and len(value) > 1 and value[1:].isdigit())
+                        is_float = value.lstrip('-').replace('.', '', 1).isdigit() and '.' in value and value.lstrip('-').replace('.', '', 1)
+
+                        if is_int and stats['type'] == DataType.INT:
+                            pass
+                        elif is_float:
                             if stats['type'] == DataType.INT:
                                 stats['type'] = DataType.FLOAT
                         else:
                             stats['type'] = DataType.VARCHAR
                             stats['max_length'] = max(stats['max_length'], len(value))
-                    elif stats['type'] == DataType.VARCHAR:
+                    if stats['type'] == DataType.VARCHAR and value:
                         stats['max_length'] = max(stats['max_length'], len(value))
 
             if row_count == 0:
@@ -250,22 +256,30 @@ class TableManager:
             stats = column_stats[header]
 
             size = None
+            element_type = None
+            array_dimensions = None
+            data_type = stats['type']
+
             if stats['type'] == DataType.VARCHAR:
                 size = max(1, int(stats['max_length'] * 1.1))
+            elif stats['type'] == DataType.ARRAY:
+                element_type = DataType.FLOAT
+                array_dimensions = 2
 
             column = ColumnDef(
                 name=header,
-                data_type=stats['type'],
+                data_type=data_type,
                 size=size,
+                element_type=element_type,
                 is_key=is_key,
-                index_type=col_index_type
+                index_type=col_index_type,
+                array_dimensions=array_dimensions
             )
             columns.append(column)
 
         table = Table(table_name, columns)
         self.tables[table_name] = table
 
-        # Crear índices
         for col in table.columns:
             if col.index_type:
                 index = create_index(
@@ -274,15 +288,22 @@ class TableManager:
                     filename=f"indices/{table.name}_{col.name}.dat",
                     is_primary=col.is_key,
                     primary_key_column=table.key_column if not col.is_key else None,
-                    table_schema=table.columns
+                    table_schema=table.columns,
+                    expected_size=row_count
                 )
                 table.indexes[col.name] = index
 
         # Segunda pasada: insertar registros en índices
-        with open(file_path, 'r', encoding='utf-8') as file:
+        all_records = []
+        skipped_records = 0
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as file:
             reader = csv.DictReader(file)
+            current_row = 0
             for row in reader:
+                current_row += 1
                 parsed_row = {}
+                skip_record = False
+                
                 for col in table.columns:
                     value_str = row[col.name].strip() if row[col.name] else ""
 
@@ -294,15 +315,43 @@ class TableManager:
                         else:
                             parsed_row[col.name] = value_str
                     elif col.data_type == DataType.INT:
-                        parsed_row[col.name] = int(value_str) if value_str else 0
+                        try:
+                            int_value = int(value_str) if value_str else 0
+                            if int_value > 2147483647 or int_value < -2147483648:
+                                skip_record = True
+                                break
+                            parsed_row[col.name] = int_value
+                        except ValueError:
+                            parsed_row[col.name] = value_str
+                    elif col.data_type == DataType.BIGINT:
+                        try:
+                            parsed_row[col.name] = int(value_str) if value_str else 0
+                        except ValueError:
+                            parsed_row[col.name] = value_str
                     elif col.data_type == DataType.FLOAT:
-                        parsed_row[col.name] = float(value_str) if value_str else 0.0
+                        try:
+                            parsed_row[col.name] = float(value_str) if value_str else 0.0
+                        except ValueError:
+                            parsed_row[col.name] = value_str
                     else:
                         parsed_row[col.name] = value_str
 
-                for _, index in table.indexes.items():
-                    if index is not None:
-                        index.add(parsed_row)
+                if not skip_record:
+                    all_records.append(parsed_row)
+                else:
+                    skipped_records += 1
+
+        
+        # Cuando cargamos muchos registros, es mejor hacer bulk load en los indices primarios
+        for _, index in table.indexes.items():
+            if index is not None:
+                # Si es que existe el metodo de bulk load lo usaremos, como en Sequential, ISAM o B+Tree
+                if hasattr(index, 'bulk_load'):
+                    index.bulk_load(all_records)
+                else:
+                    # Para los indices secundarios usaremos solo el add regular, por sus propiedades
+                    for _, record in enumerate(all_records, 1):
+                        index.add(record)
 
         self._save_table_metadata()
 
@@ -322,6 +371,7 @@ class TableManager:
         for _, index in table.indexes.items():
             if index is not None:
                 index.add(record_dict)
+                
 
 
     '''
@@ -848,3 +898,25 @@ class TableManager:
                     table.indexes[col.name] = index
 
             self.tables[table_name] = table
+    
+    def get_io_stats(self, table_name: str) -> Dict[str, int]:
+        if table_name not in self.tables:
+            return {}
+        
+        table = self.tables[table_name]
+        primary_index = table.indexes.get(table.key_column)
+        
+        if primary_index and hasattr(primary_index, 'get_io_stats'):
+            return primary_index.get_io_stats()
+        
+        return {}
+    
+    def reset_io_stats(self, table_name: str):
+        if table_name not in self.tables:
+            return
+        
+        table = self.tables[table_name]
+        primary_index = table.indexes.get(table.key_column)
+        
+        if primary_index and hasattr(primary_index, 'reset_io_stats'):
+            primary_index.reset_io_stats()
