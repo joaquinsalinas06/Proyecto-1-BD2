@@ -73,8 +73,11 @@ export default function SQLEditor() {
       })
 
       if (response.data.success) {
-        setResults(response.data.results || [])
-        setResults(response.data.data || [])
+        // Limpiar error en caso de éxito
+        setError(null)
+        // Usar data para consultas SELECT, results para información general
+        const queryData = response.data.data || []
+        setResults(queryData)
         setQueryMetadata({
           message: response.data.message,
           queryType: response.data.query_type,
@@ -88,6 +91,7 @@ export default function SQLEditor() {
         setError("Error al ejecutar la consulta")
       }
     } catch (err: any) {
+      console.log("Error response:", err.response?.data); // Debug log
       if (err.response?.data?.detail) {
         const detail = err.response.data.detail
         if (typeof detail === 'object' && detail.error) {
@@ -97,12 +101,18 @@ export default function SQLEditor() {
         } else {
           setError("Error al ejecutar la consulta")
         }
+      } else if (err.response?.status >= 400 && err.response?.status < 500) {
+        // Error HTTP 4xx - problema con la consulta
+        setError(err.response?.data?.message || "Error en la consulta SQL")
       } else if (err.code === 'ECONNREFUSED') {
         setError("El servidor de base de datos no está ejecutándose. Por favor inicie el servidor API en el puerto 8000.")
       } else {
         setError(err.message || "Ocurrió un error inesperado")
       }
-      fetchHistory()
+      // Solo actualizar historial si realmente hubo un error
+      if (err.response?.status >= 400) {
+        fetchHistory()
+      }
     } finally {
       setIsLoading(false)
     }

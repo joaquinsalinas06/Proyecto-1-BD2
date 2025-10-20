@@ -6,6 +6,8 @@ class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1)
 
 class QueryResponse(BaseModel):
+    success: bool = True
+    results: Optional[List[Dict[str, Any]]] = None
     data: Optional[List[Dict[str, Any]]] = None
     message: Optional[str] = None
     query_preview: str
