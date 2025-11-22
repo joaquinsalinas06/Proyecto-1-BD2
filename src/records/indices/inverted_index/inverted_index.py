@@ -11,8 +11,8 @@ from typing import Dict, List, Optional, Tuple, TypeAlias, Iterable
 from .document_file import DocumentFile
 from ...utils.text_utils import bow  # bag of words: str -> Dict[str, int]
 
-MEMORY_LIMIT = 3072        
-BUCKET_LIMIT = 1024 
+MEMORY_LIMIT = 8 * 1024 * 1024   # 8 MB
+BUCKET_LIMIT = 64 * 1024         # 64 KB
 
 Posting: TypeAlias = Dict[str, int]          
 BType: TypeAlias = Dict[str, Posting]     
@@ -138,6 +138,7 @@ class InvertedIndex:
             fanin = max(1, B - 1)
 
             for g in range(0, n, fanin):
+                print("g", g )
                 
                 group_ids = list(range(g, min(g + fanin, n)))
                 buffers = [active_file.read(bi) for bi in group_ids]
