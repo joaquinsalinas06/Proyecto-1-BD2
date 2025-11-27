@@ -8,11 +8,11 @@ import itertools
 import math
 from typing import Dict, List, Optional, Tuple, TypeAlias, Iterable
 
-from .document_file import DocumentFile
-from ...utils.text_utils import bow  # bag of words: str -> Dict[str, int]
+from document_file import DocumentFile
+from utils.text_utils import bow  # bag of words: str -> Dict[str, int]
 
-MEMORY_LIMIT = 3072        
-BUCKET_LIMIT = 1024 
+MEMORY_LIMIT =  8 * 1024 * 1024     
+BUCKET_LIMIT = 64 * 1024
 
 Posting: TypeAlias = Dict[str, int]          
 BType: TypeAlias = Dict[str, Posting]     
@@ -110,12 +110,11 @@ class InvertedIndex:
     def _sort_dict(d: BType) -> BType:
         return {term: dict(sorted(postings.items())) for term, postings in sorted(d.items())}
 
-    # Public: fully sort & merge the inverted file (multiway merge; SPIMI-like finalization)
     def build_index(self) -> None:
-        
-        B = max(2, MEMORY_LIMIT // BUCKET_LIMIT)    
+        B = max(2, MEMORY_LIMIT // BUCKET_LIMIT)
         num_buckets = self.file._read_header()
 
+        # 1) ordenar cada bucket individual
         for i in range(num_buckets):
             d = self.file.read(i)
             self.file.write(i, self._sort_dict(d))
@@ -123,22 +122,25 @@ class InvertedIndex:
         current_name = self.filename
         active_file = self.file
         round_no = 1
+        prev_n = None 
 
         while True:
             n = active_file._read_header()
-            if n <= 1:
+            print(f"[DBG] round={round_no}, n={n}, B={B}, fanin={max(1, B-1)}")
+
+            # condición de parada:
+            if n <= 1 or n == prev_n:
                 break
+            prev_n = n
 
             tmp_name = os.path.splitext(current_name)[0] + f"_tmp_{round_no}.dat"
             if os.path.exists(tmp_name):
                 os.remove(tmp_name)
-
             out = InvertedFile(tmp_name)
 
             fanin = max(1, B - 1)
 
             for g in range(0, n, fanin):
-                
                 group_ids = list(range(g, min(g + fanin, n)))
                 buffers = [active_file.read(bi) for bi in group_ids]
                 lists = [sorted(buf.items()) for buf in buffers]
@@ -225,58 +227,15 @@ class InvertedIndex:
             round_no += 1
 
     def _get_by_word(self, w: str) -> Tuple[Posting, int]:
-        low, high = 0, self.file._read_header() - 1
-        result: Posting = {}
-        found_idx = -1
-
-        # binary search to find a bucket that could contain `w`
-        while low <= high:
-            mid = (low + high) // 2
-            bucket = self.file.read(mid)
-            if not bucket:
-                break
-            terms = list(bucket.keys())
-            if not terms:
-                break
-            if w < terms[0]:
-                high = mid - 1
-            elif w > terms[-1]:
-                low = mid + 1
-            else:
-                if w in bucket:
-                    found_idx = mid
-                    break
-                # fallback linear scan within bucket range
-                for t in terms:
-                    if t == w:
-                        found_idx = mid
-                        break
-                if found_idx != -1:
-                    break
-                high = mid - 1
-
-        if found_idx == -1:
-            return {}, 0
-
-        # scan left
-        i = found_idx - 1
-        while i >= 0:
-            b = self.file.read(i)
-            if w in b:
-                result = _merge_postings(result, b[w])
-                i -= 1
-            else:
-                break
-        # scan right (including found)
-        i = found_idx
         n = self.file._read_header()
-        while i < n:
+        result: Posting = {}
+
+        for i in range(n):
             b = self.file.read(i)
-            if w in b:
-                result = _merge_postings(result, b[w])
-                i += 1
-            else:
-                break
+            postings = b.get(w)
+            if postings:
+                result = _merge_postings(result, postings)
+
         return result, len(result)
 
     def search(self, query: str, limit: int = 10) -> List[Tuple[str, float]]:
@@ -313,11 +272,14 @@ class InvertedIndex:
                 s["dot"] += tfidf_d * q_weights[term]
                 s["norm_sq"] += tfidf_d * tfidf_d
 
-        results: List[Tuple[float, str]] = []
+        results: List[Tuple[str, float]] = []
         for doc_id, s in scores.items():
             d_norm = math.sqrt(s["norm_sq"]) or 1.0
             sim = s["dot"] / (q_norm * d_norm)
-            results.append((sim, doc_id))
+            results.append((doc_id, sim))
 
-        results.sort(reverse=True)
-        return [(doc_id, sim) for sim, doc_id in results[:limit]]
+        # ordenar: primero por score descendente, luego por doc_id ascendente
+        results.sort(key=lambda x: (-x[1], x[0]))
+
+        return results[:limit]
+
