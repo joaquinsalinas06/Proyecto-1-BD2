@@ -1,6 +1,6 @@
-from .inverted_index import InvertedFile, BType, BUCKET_LIMIT, _estimate_bytes_for_record
-from .document_file import DocumentFile
-from ...utils.text_utils import bow  # bag of words: str -> Dict[str, int]
+from inverted_index import InvertedFile, BType, BUCKET_LIMIT, _estimate_bytes_for_record
+from document_file import DocumentFile
+from utils.text_utils import bow  # bag of words: str -> Dict[str, int]
 
 class TextIndexer:
 
@@ -38,13 +38,18 @@ class TextIndexer:
         return None
 
     def add_document(self, doc_id: str, text: str) -> None:
+        """
+            convierte el texto en una bolsa de palabras (bow),
+            agrega la información al índice invertido,
+            y registra el documento en el DocumentFile.    
+        """
         bow_ = bow(text)
-        self.docs.append(doc_id, len(bow_))
+        self.docs.append(doc_id, len(bow_)) # para facil accesso futuro
 
         for term, freq in bow_.items():
             action = self._maybe_flush_after_add(term, doc_id, freq)
             if action == "direct":
-                # Ya se escribió como bucket propio; no agregues al bucket en memoria.
+                # ya se escribió como bucket propio
                 continue
             postings = self._bucket.setdefault(term, {})
             prev = postings.get(doc_id, 0)
